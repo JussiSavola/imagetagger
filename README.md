@@ -20,8 +20,8 @@ A Python tool that uses Venice.ai vision models to automatically analyze images 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/image-metadata-enricher.git
-cd image-metadata-enricher
+git clone https://github.com/JussiSavola/imagetagger.git
+cd imagetagger
 
 # Create virtual environment
 python -m venv venv
@@ -67,7 +67,7 @@ model=google-gemma-3-27b-it
 ### Basic Usage
 
 ```bash
-python image-enricher.py
+python imagetagger.py
 ```
 
 Processes all JPG/JPEG/PNG images in the current directory.
@@ -75,7 +75,7 @@ Processes all JPG/JPEG/PNG images in the current directory.
 ### Specify Directory
 
 ```python
-from image_enricher import process_images
+from imagetagger.py import process_images
 
 process_images("/path/to/images")
 ```

@@ -2,6 +2,8 @@ import os
 import base64
 import io
 import time
+import argparse
+import shutil
 from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
@@ -12,7 +14,6 @@ from tqdm import tqdm
 # Configuration
 MAX_DIMENSIONS = (800, 600)
 SUPPORTED_FORMATS = ('.jpg', '.jpeg', '.png')
-PROCESSED_SUFFIX = "_enriched"
 
 # Venice.ai specific constants
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
@@ -46,8 +47,6 @@ class VeniceConfig:
         self.model = self.config.get('model', 'google-gemma-3-27b-it')
         
         self.is_vision = any(v in self.model.lower() for v in VISION_KEYWORDS)
-        if not self.is_vision:
-            print(f"⚠️  Warning: {self.model} may not support vision")
 
     def get_headers(self):
         return {
@@ -67,34 +66,36 @@ def resize_for_api(image_path):
         b64 = base64.b64encode(buffer.getvalue()).decode('ascii')
         return b64, orig_size, img.size
 
-def extract_metadata(image_path):
+def extract_metadata(image_path, verbose=False):
     meta = {'raw_exif': {}, 'display_lines': [], 'ai_context': []}
     try:
         with Image.open(image_path) as img:
             meta['display_lines'].append(f"Format: {img.format} | Size: {img.size[0]}x{img.size[1]}")
+            if verbose:
+                meta['display_lines'].append(f"  Mode: {img.mode} | Bits: {getattr(img, 'bits', 'N/A')}")
+                
             if hasattr(img, '_getexif') and img._getexif():
                 exif = img._getexif()
                 for tag_id, value in exif.items():
                     tag = TAGS.get(tag_id, tag_id)
                     meta['raw_exif'][tag] = value
                     val_str = str(value)[:60]
-                    if tag in ['Make', 'Model', 'DateTime', 'DateTimeOriginal', 'GPSInfo', 'ImageDescription']:
+                    
+                    if verbose:
+                        meta['display_lines'].append(f"  [EXIF] {tag}: {val_str}")
+                    elif tag in ['Make', 'Model', 'DateTime', 'DateTimeOriginal', 'GPSInfo', 'ImageDescription']:
                         meta['display_lines'].append(f"  [META] {tag}: {val_str}")
+                        
+                    if tag in ['Make', 'Model', 'DateTime', 'DateTimeOriginal', 'GPSInfo', 'ImageDescription']:
                         meta['ai_context'].append(f"{tag}: {val_str}")
+                        
             if not meta['raw_exif']:
                 meta['display_lines'].append("  [No EXIF]")
     except Exception as e:
         meta['display_lines'].append(f"  [Error: {e}]")
     return meta
 
-def call_venice_for_keywords(base64_image, metadata_context, config):
-    """
-    Call Venice API with Best Practices:
-    - Exponential Backoff on Rate Limits
-    - Balance Monitoring (x-venice-balance-usd)
-    - Request Logging (CF-RAY)
-    - Model Deprecation Warnings
-    """
+def call_venice_for_keywords(base64_image, metadata_context, config, verbose=False):
     url = f"{config.base_url}/chat/completions"
     b64_clean = base64_image.strip().replace('\n', '').replace('\r', '')
     
@@ -119,45 +120,43 @@ Rules:
         "temperature": 0.2
     }
     
-    # Exponential Backoff Configuration
+    if verbose:
+        print(f"\n  [VERBOSE] API Request Payload:")
+        print(f"    Model: {config.model}")
+        print(f"    Message Count: {len(payload['messages'])}")
+    
     max_retries = 3
-    base_delay = 1  # seconds
+    base_delay = 1
     
     for attempt in range(max_retries):
         try:
-            response = requests.post(
-                url,
-                headers=config.get_headers(),
-                json=payload,
-                timeout=60
-            )
+            response = requests.post(url, headers=config.get_headers(), json=payload, timeout=60)
             
-            # --- VENICE BEST PRACTICES HANDLING ---
+            if verbose:
+                print(f"\n  [VERBOSE] API Response Headers:")
+                for key, value in response.headers.items():
+                    if key.lower().startswith('x-') or key.lower() == 'cf-ray':
+                        print(f"    {key}: {value}")
             
-            # 1. Balance Monitoring
             balance_usd = response.headers.get('x-venice-balance-usd')
-            balance_diem = response.headers.get('x-venice-balance-diem')
             if balance_usd:
                 print(f"    💰 Balance: ${float(balance_usd):.4f}")
             
-            # 2. Model Deprecation Warning
             deprecation = response.headers.get('x-venice-model-deprecation-warning')
             if deprecation:
                 print(f"    ⚠️  DEPRECATION: {deprecation}")
             
-            # 3. Rate Limiting Check
-            remaining_requests = response.headers.get('x-ratelimit-remaining-requests')
-            remaining_tokens = response.headers.get('x-ratelimit-remaining-tokens')
-            
-            # Handle specific status codes
             if response.status_code == 200:
                 result = response.json()
                 content = result['choices'][0]['message']['content']
+                
+                if verbose:
+                    print(f"\n  [VERBOSE] Raw AI Response:\n  {content}")
+                    
                 keywords = parse_keywords(content)
                 return content, keywords
             
             elif response.status_code == 429:
-                # Rate limited - exponential backoff
                 delay = base_delay * (2 ** attempt)
                 print(f"    ⏳ Rate limited. Waiting {delay}s... (Attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
@@ -165,17 +164,13 @@ Rules:
             
             elif response.status_code == 401:
                 return "ERROR_401: Invalid API key", []
-            
             elif response.status_code == 404:
                 return f"ERROR_404: Model '{config.model}' not found", []
-            
             elif response.status_code == 400:
                 error_data = response.json() if response.text else {}
                 msg = error_data.get('error', {}).get('message', response.text[:200])
                 return f"ERROR_400: {msg}", []
-            
             else:
-                # 4. Request Logging (CF-RAY) for support
                 cf_ray = response.headers.get('CF-RAY', 'N/A')
                 return f"ERROR_{response.status_code}: CF-RAY={cf_ray}", []
                 
@@ -186,14 +181,12 @@ Rules:
                 time.sleep(delay)
                 continue
             return "ERROR: Request timeout after retries", []
-            
         except Exception as e:
             return f"EXCEPTION: {str(e)}", []
     
     return "ERROR: Max retries exceeded", []
 
 def parse_keywords(ai_response):
-    """Extract clean keywords from AI response"""
     cleaned = ai_response.replace("Keywords:", "").replace("Tags:", "")
     cleaned = cleaned.replace("Here are the keywords:", "").replace("Here is a list of keywords:", "")
     
@@ -210,7 +203,7 @@ def parse_keywords(ai_response):
     
     return clean_list[:20]
 
-def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response, original_exif_bytes=None):
+def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response, original_exif_bytes=None, verbose=False):
     """Write keywords into EXIF/IPTC metadata using piexif"""
     try:
         import piexif
@@ -232,6 +225,11 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
             exif_dict["0th"][ImageIFD.ImageDescription] = description.encode('utf-8')
             exif_dict["Exif"][ExifIFD.UserComment] = description.encode('utf-8')
             
+            if verbose:
+                print(f"\n  [VERBOSE] Writing EXIF fields:")
+                print(f"    XPKeywords: {keywords_str}")
+                print(f"    ImageDescription: {description[:50]}...")
+            
             exif_bytes = piexif.dump(exif_dict)
             
             ext = original_path.suffix.lower()
@@ -243,7 +241,8 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
         return True
         
     except ImportError:
-        print("      ⚠️  Install piexif: pip install piexif")
+        print("      ⚠️  Install piexif to write metadata: pip install piexif")
+        # Fallback: just copy the file
         with Image.open(original_path) as img:
             save_kwargs = {}
             if original_exif_bytes:
@@ -254,20 +253,32 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
         print(f"      ⚠️  Metadata write failed: {e}")
         return False
 
-def process_images(input_dir):
-    input_path = Path(input_dir)
-    output_path = input_path / "enriched"
-    output_path.mkdir(exist_ok=True)
+def process_images(input_dir, overwrite=False, verbose=False):
+    input_path = Path(input_dir).resolve()
+    
+    if not input_path.is_dir():
+        print(f"Error: Input directory '{input_dir}' does not exist or is not a directory.")
+        return
+
+    if overwrite:
+        print(f"\n{'='*70}")
+        print("⚠️  OVERWRITE MODE ENABLED - Original files will be modified")
+        print(f"{'='*70}")
     
     print(f"\n{'='*70}")
-    print("IMAGE KEYWORD EXTRACTOR - Venice.ai (Production Ready)")
+    print("IMAGE KEYWORD EXTRACTOR - Venice.ai")
     print(f"{'='*70}")
     
     try:
         config = VeniceConfig()
         print(f"Model: {config.model}")
-        print(f"Vision: {'Yes' if config.is_vision else 'No (text only)'}")
-        print(f"Endpoint: {config.base_url}")
+        print(f"Vision: {'Yes' if config.is_vision else 'No (text-only)'}")
+        print(f"Input:  {input_path}")
+        
+        # FIX: Calculate string outside of f-string
+        mode_desc = "Overwrite original files" if overwrite else "Create copies in 'enriched' subfolder"
+        print(f"Mode:   {mode_desc}")
+        
         print(f"{'='*70}\n")
     except Exception as e:
         print(f"Config Error: {e}")
@@ -277,7 +288,7 @@ def process_images(input_dir):
               if f.is_file() and f.suffix.lower() in SUPPORTED_FORMATS]
     
     if not images:
-        print(f"No images found")
+        print(f"No supported images found in {input_path}")
         return
     
     print(f"Found {len(images)} image(s)\n")
@@ -287,10 +298,12 @@ def process_images(input_dir):
         print(f"[{idx}/{len(images)}] {img_file.name}")
         print(f"{'─'*70}")
         
+        temp_file = None
+        
         try:
             # 1. Metadata
             print("\n📋 EXISTING METADATA")
-            meta = extract_metadata(img_file)
+            meta = extract_metadata(img_file, verbose=verbose)
             for line in meta['display_lines']:
                 print(f"  {line}")
             
@@ -302,7 +315,7 @@ def process_images(input_dir):
             # 3. Get Keywords
             print(f"\n🤖 EXTRACTING KEYWORDS")
             meta_text = ", ".join(meta['ai_context'])
-            ai_response, keywords = call_venice_for_keywords(b64, meta_text, config)
+            ai_response, keywords = call_venice_for_keywords(b64, meta_text, config, verbose=verbose)
             
             if keywords:
                 print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
@@ -316,7 +329,45 @@ def process_images(input_dir):
             # 4. Save
             print(f"\n💾 SAVING")
             
-            analysis_file = output_path / f"{img_file.stem}_keywords.txt"
+            # Determine output paths
+            if overwrite:
+                temp_file = img_file.parent / f"{img_file.stem}_temp{img_file.suffix}"
+                final_output = img_file
+            else:
+                output_dir = input_path / "enriched"
+                output_dir.mkdir(exist_ok=True)
+                temp_file = None
+                final_output = output_dir / f"{img_file.stem}_enriched{img_file.suffix}"
+            
+            # Get original EXIF
+            orig_exif = None
+            with Image.open(img_file) as tmp:
+                if 'exif' in tmp.info:
+                    orig_exif = tmp.info['exif']
+
+            target_to_write = temp_file if temp_file else final_output
+            
+            success = save_with_new_metadata(img_file, target_to_write, keywords, ai_response, orig_exif, verbose=verbose)
+            
+            if success:
+                if overwrite:
+                    # Atomic overwrite
+                    shutil.move(str(target_to_write), str(final_output))
+                    print(f"  ✅ Overwritten: {final_output.name}")
+                else:
+                    print(f"  ✅ Enriched: {final_output.name}")
+                print(f"  ✅ Keywords embedded in EXIF")
+            else:
+                if overwrite and target_to_write.exists():
+                    target_to_write.unlink() # Clean up temp file
+                print(f"  ⚠️  Metadata preserved (no keywords written)")
+
+            # 5. Save text log
+            log_dir = input_path / "enriched"
+            if overwrite:
+                log_dir.mkdir(exist_ok=True) # Ensure enriched folder exists for logs
+
+            analysis_file = log_dir / f"{img_file.stem}_keywords.txt"
             with open(analysis_file, 'w', encoding='utf-8') as f:
                 f.write(f"Source: {img_file.name}\n")
                 f.write(f"Model: {config.model}\n")
@@ -326,39 +377,41 @@ def process_images(input_dir):
                 f.write(f"\n{'='*50}\n")
                 f.write("RAW AI RESPONSE:\n")
                 f.write(ai_response)
-            print(f"  Text file: {analysis_file.name}")
+            print(f"  📝 Log: {analysis_file.relative_to(Path.cwd())}")
             
-            enriched_file = output_path / f"{img_file.stem}{PROCESSED_SUFFIX}{img_file.suffix}"
-            orig_exif = None
-            with Image.open(img_file) as tmp:
-                orig_exif = tmp.info.get('exif')
-            
-            success = save_with_new_metadata(img_file, enriched_file, keywords, ai_response, orig_exif)
-            
-            if success:
-                print(f"  Enriched image: {enriched_file.name}")
-                print(f"  ✓ Keywords embedded in EXIF")
-            else:
-                print(f"  Copied: {enriched_file.name} (metadata preserved)")
-            
-            if img_file.exists():
-                print(f"  🔒 Original preserved")
-            
-            # 5. Verify
-            print(f"\n🔍 VERIFICATION")
-            if keywords:
-                print(f"  Output keywords: {len(keywords)} tags")
-                print(f"  Sample: {', '.join(keywords[:3])}")
-                
         except Exception as e:
             print(f"\n  ❌ ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    print(f"\n{'='*70}")
-    print("COMPLETE")
-    print(f"Output: {output_path.absolute()}")
-    print(f"{'='*70}")
+            if verbose:
+                import traceback
+                traceback.print_exc()
+            if overwrite and temp_file and temp_file.exists():
+                temp_file.unlink() # Clean up temp file on failure
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Enrich image files with AI-generated keywords using Venice.ai.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument(
+        '-d', '--directory',
+        type=str,
+        default='.',
+        help='Directory containing images to process (default: current directory)'
+    )
+    parser.add_argument(
+        '-o', '--overwrite',
+        action='store_true',
+        help='Overwrite original images instead of creating copies.\n'
+    )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose output (API details, all EXIF tags, etc.).\n'
+    )
+    args = parser.parse_args()
+
+    process_images(input_dir=args.directory, overwrite=args.overwrite, verbose=args.verbose)
 
 if __name__ == "__main__":
-    process_images(".")
+    main()

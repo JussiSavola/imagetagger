@@ -14,6 +14,7 @@ from tqdm import tqdm
 # Configuration
 MAX_DIMENSIONS = (800, 600)
 SUPPORTED_FORMATS = ('.jpg', '.jpeg', '.png')
+PROCESSED_MARKER = "jms"
 
 # Venice.ai specific constants
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
@@ -53,6 +54,41 @@ class VeniceConfig:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+
+def check_already_processed(image_path):
+    """
+    Check if image has already been processed by looking for the 'jms' marker
+    in XPKeywords EXIF field.
+    Returns True if already processed, False otherwise.
+    """
+    try:
+        import piexif
+        
+        with Image.open(image_path) as img:
+            if 'exif' not in img.info:
+                return False
+            
+            exif_dict = piexif.load(img.info['exif'])
+            xp_keywords_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords, None)
+            
+            if xp_keywords_raw is None:
+                return False
+            
+            # XPKeywords is stored as UTF-16LE bytes
+            if isinstance(xp_keywords_raw, bytes):
+                keywords_str = xp_keywords_raw.decode('utf-16le', errors='ignore')
+            else:
+                keywords_str = str(xp_keywords_raw)
+            
+            # Check if marker exists as a standalone keyword
+            existing_keywords = [k.strip().lower() for k in keywords_str.split(',')]
+            return PROCESSED_MARKER.lower() in existing_keywords
+            
+    except ImportError:
+        # piexif not installed, cannot check
+        return False
+    except Exception:
+        return False
 
 def resize_for_api(image_path):
     """Resize and encode to base64"""
@@ -204,7 +240,7 @@ def parse_keywords(ai_response):
     return clean_list[:20]
 
 def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response, original_exif_bytes=None, verbose=False):
-    """Write keywords into EXIF/IPTC metadata using piexif"""
+    """Write keywords into EXIF/IPTC metadata using piexif, including the processing marker."""
     try:
         import piexif
         from piexif import ImageIFD, ExifIFD
@@ -215,13 +251,16 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
             else:
                 exif_dict = {"0th": {}, "1st": {}, "Exif": {}, "GPS": {}, "thumbnail": None}
             
-            keywords_str = ", ".join(keywords) if keywords else "AI analyzed"
+            # Add processing marker to keyword list
+            all_keywords = list(keywords) if keywords else []
+            if PROCESSED_MARKER not in all_keywords:
+                all_keywords.append(PROCESSED_MARKER)
+            
+            keywords_str = ", ".join(all_keywords)
             description = ai_raw_response[:500] if len(ai_raw_response) > 500 else ai_raw_response
             
-            if keywords:
-                exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
-                exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
-            
+            exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
+            exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
             exif_dict["0th"][ImageIFD.ImageDescription] = description.encode('utf-8')
             exif_dict["Exif"][ExifIFD.UserComment] = description.encode('utf-8')
             
@@ -229,6 +268,7 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
                 print(f"\n  [VERBOSE] Writing EXIF fields:")
                 print(f"    XPKeywords: {keywords_str}")
                 print(f"    ImageDescription: {description[:50]}...")
+                print(f"    Processing marker: '{PROCESSED_MARKER}' included")
             
             exif_bytes = piexif.dump(exif_dict)
             
@@ -242,7 +282,6 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
         
     except ImportError:
         print("      ⚠️  Install piexif to write metadata: pip install piexif")
-        # Fallback: just copy the file
         with Image.open(original_path) as img:
             save_kwargs = {}
             if original_exif_bytes:
@@ -253,7 +292,7 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
         print(f"      ⚠️  Metadata write failed: {e}")
         return False
 
-def process_images(input_dir, overwrite=False, verbose=False):
+def process_images(input_dir, overwrite=False, verbose=False, force=False):
     input_path = Path(input_dir).resolve()
     
     if not input_path.is_dir():
@@ -271,14 +310,13 @@ def process_images(input_dir, overwrite=False, verbose=False):
     
     try:
         config = VeniceConfig()
-        print(f"Model: {config.model}")
+        print(f"Model:  {config.model}")
         print(f"Vision: {'Yes' if config.is_vision else 'No (text-only)'}")
         print(f"Input:  {input_path}")
-        
-        # FIX: Calculate string outside of f-string
-        mode_desc = "Overwrite original files" if overwrite else "Create copies in 'enriched' subfolder"
+        mode_desc = "Overwrite original files" if overwrite else "Create copies in enriched subfolder"
         print(f"Mode:   {mode_desc}")
-        
+        if force:
+            print(f"Force:  Yes (reprocessing all images)")
         print(f"{'='*70}\n")
     except Exception as e:
         print(f"Config Error: {e}")
@@ -293,10 +331,30 @@ def process_images(input_dir, overwrite=False, verbose=False):
     
     print(f"Found {len(images)} image(s)\n")
     
+    skipped = 0
+    processed = 0
+    errors = 0
+    
     for idx, img_file in enumerate(images, 1):
         print(f"\n{'─'*70}")
         print(f"[{idx}/{len(images)}] {img_file.name}")
         print(f"{'─'*70}")
+        
+        # Check if already processed (unless --force is used)
+        if not force:
+            already_done = check_already_processed(img_file)
+            if already_done:
+                print(f"  ⏭️  SKIPPED - Already processed ('{PROCESSED_MARKER}' marker found)")
+                skipped += 1
+                continue
+            
+            # Also check enriched copy if not in overwrite mode
+            if not overwrite:
+                enriched_check = input_path / "enriched" / f"{img_file.stem}_enriched{img_file.suffix}"
+                if enriched_check.exists() and check_already_processed(enriched_check):
+                    print(f"  ⏭️  SKIPPED - Enriched copy already exists")
+                    skipped += 1
+                    continue
         
         temp_file = None
         
@@ -325,11 +383,11 @@ def process_images(input_dir, overwrite=False, verbose=False):
                 print(f"  ⚠️  No keywords parsed")
                 if ai_response.startswith("ERROR"):
                     print(f"     {ai_response}")
+                    errors += 1
             
             # 4. Save
             print(f"\n💾 SAVING")
             
-            # Determine output paths
             if overwrite:
                 temp_file = img_file.parent / f"{img_file.stem}_temp{img_file.suffix}"
                 final_output = img_file
@@ -339,7 +397,6 @@ def process_images(input_dir, overwrite=False, verbose=False):
                 temp_file = None
                 final_output = output_dir / f"{img_file.stem}_enriched{img_file.suffix}"
             
-            # Get original EXIF
             orig_exif = None
             with Image.open(img_file) as tmp:
                 if 'exif' in tmp.info:
@@ -351,21 +408,21 @@ def process_images(input_dir, overwrite=False, verbose=False):
             
             if success:
                 if overwrite:
-                    # Atomic overwrite
                     shutil.move(str(target_to_write), str(final_output))
                     print(f"  ✅ Overwritten: {final_output.name}")
                 else:
                     print(f"  ✅ Enriched: {final_output.name}")
-                print(f"  ✅ Keywords embedded in EXIF")
+                print(f"  ✅ Keywords embedded in EXIF (with '{PROCESSED_MARKER}' marker)")
+                processed += 1
             else:
                 if overwrite and target_to_write.exists():
-                    target_to_write.unlink() # Clean up temp file
+                    target_to_write.unlink()
                 print(f"  ⚠️  Metadata preserved (no keywords written)")
+                errors += 1
 
             # 5. Save text log
             log_dir = input_path / "enriched"
-            if overwrite:
-                log_dir.mkdir(exist_ok=True) # Ensure enriched folder exists for logs
+            log_dir.mkdir(exist_ok=True)
 
             analysis_file = log_dir / f"{img_file.stem}_keywords.txt"
             with open(analysis_file, 'w', encoding='utf-8') as f:
@@ -381,11 +438,21 @@ def process_images(input_dir, overwrite=False, verbose=False):
             
         except Exception as e:
             print(f"\n  ❌ ERROR: {e}")
+            errors += 1
             if verbose:
                 import traceback
                 traceback.print_exc()
             if overwrite and temp_file and temp_file.exists():
-                temp_file.unlink() # Clean up temp file on failure
+                temp_file.unlink()
+    
+    # Summary
+    print(f"\n{'='*70}")
+    print("COMPLETE")
+    print(f"  Processed: {processed}")
+    print(f"  Skipped:   {skipped}")
+    print(f"  Errors:    {errors}")
+    print(f"  Total:     {len(images)}")
+    print(f"{'='*70}")
 
 
 def main():
@@ -402,16 +469,26 @@ def main():
     parser.add_argument(
         '-o', '--overwrite',
         action='store_true',
-        help='Overwrite original images instead of creating copies.\n'
+        help='Overwrite original images instead of creating copies.'
     )
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
-        help='Enable verbose output (API details, all EXIF tags, etc.).\n'
+        help='Enable verbose output (API details, all EXIF tags, etc.).'
+    )
+    parser.add_argument(
+        '-f', '--force',
+        action='store_true',
+        help='Force reprocessing of all images, even if already processed.'
     )
     args = parser.parse_args()
 
-    process_images(input_dir=args.directory, overwrite=args.overwrite, verbose=args.verbose)
+    process_images(
+        input_dir=args.directory,
+        overwrite=args.overwrite,
+        verbose=args.verbose,
+        force=args.force
+    )
 
 if __name__ == "__main__":
     main()

@@ -4,29 +4,35 @@ import io
 import time
 import argparse
 import shutil
+import sys
 from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 import requests
 import json
-from tqdm import tqdm
 
 # Configuration
 MAX_DIMENSIONS = (800, 600)
 SUPPORTED_FORMATS = ('.jpg', '.jpeg', '.png')
-PROCESSED_MARKER = "jms"
+DEFAULT_TAG = "jms"
+DEFAULT_ENV_FILE = "env.txt"
 
 # Venice.ai specific constants
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
 VISION_KEYWORDS = ['vision', 'vl', 'llava', 'gemma', 'qwen2.5-vl', 'dolphin-vision', 'llava-1.6', 'qwen-vl']
 
 class VeniceConfig:
-    def __init__(self):
-        script_dir = Path(__file__).parent.absolute()
-        env_file = script_dir / "env.txt"
+    def __init__(self, env_file_path=None):
+        # Determine env file location
+        if env_file_path:
+            env_file = Path(env_file_path).resolve()
+        else:
+            # Default: same directory as script
+            script_dir = Path(__file__).parent.absolute()
+            env_file = script_dir / DEFAULT_ENV_FILE
         
         if not env_file.exists():
-            raise FileNotFoundError(f"Create env.txt in {script_dir} with: api_key=YOUR_KEY")
+            raise FileNotFoundError(f"Config file not found: {env_file}\nCreate it with: api_key=YOUR_KEY")
         
         self.config = {}
         with open(env_file, 'r') as f:
@@ -42,7 +48,7 @@ class VeniceConfig:
         
         self.api_key = self.config.get('api_key')
         if not self.api_key:
-            raise ValueError("api_key required in env.txt")
+            raise ValueError(f"api_key required in {env_file}")
         
         self.base_url = self.config.get('api_base', VENICE_BASE_URL).rstrip('/')
         self.model = self.config.get('model', 'google-gemma-3-27b-it')
@@ -55,11 +61,10 @@ class VeniceConfig:
             "Content-Type": "application/json"
         }
 
-def check_already_processed(image_path):
+def check_already_processed(image_path, marker, use_xpcomment=False):
     """
-    Check if image has already been processed by looking for the 'jms' marker
-    in XPKeywords EXIF field.
-    Returns True if already processed, False otherwise.
+    Check if image has already been processed by looking for the marker
+    either in XPComment (if use_xpcomment=True) or XPKeywords (if use_xpcomment=False).
     """
     try:
         import piexif
@@ -69,23 +74,32 @@ def check_already_processed(image_path):
                 return False
             
             exif_dict = piexif.load(img.info['exif'])
-            xp_keywords_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords, None)
             
-            if xp_keywords_raw is None:
+            if use_xpcomment:
+                # Check ONLY XPComment field
+                xp_comment_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPComment, None)
+                if xp_comment_raw:
+                    if isinstance(xp_comment_raw, bytes):
+                        comment_str = xp_comment_raw.decode('utf-16le', errors='ignore')
+                    else:
+                        comment_str = str(xp_comment_raw)
+                    return marker.lower() in comment_str.lower()
                 return False
-            
-            # XPKeywords is stored as UTF-16LE bytes
-            if isinstance(xp_keywords_raw, bytes):
-                keywords_str = xp_keywords_raw.decode('utf-16le', errors='ignore')
             else:
-                keywords_str = str(xp_keywords_raw)
-            
-            # Check if marker exists as a standalone keyword
-            existing_keywords = [k.strip().lower() for k in keywords_str.split(',')]
-            return PROCESSED_MARKER.lower() in existing_keywords
+                # Check ONLY XPKeywords field
+                xp_keywords_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords, None)
+                if xp_keywords_raw is None:
+                    return False
+                
+                if isinstance(xp_keywords_raw, bytes):
+                    keywords_str = xp_keywords_raw.decode('utf-16le', errors='ignore')
+                else:
+                    keywords_str = str(xp_keywords_raw)
+                
+                existing_keywords = [k.strip().lower() for k in keywords_str.split(',')]
+                return marker.lower() in existing_keywords
             
     except ImportError:
-        # piexif not installed, cannot check
         return False
     except Exception:
         return False
@@ -239,8 +253,9 @@ def parse_keywords(ai_response):
     
     return clean_list[:20]
 
-def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response, original_exif_bytes=None, verbose=False):
-    """Write keywords into EXIF/IPTC metadata using piexif, including the processing marker."""
+def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response, 
+                          original_exif_bytes=None, verbose=False, marker=None, use_xpcomment=False):
+    """Write keywords into EXIF/IPTC metadata using piexif."""
     try:
         import piexif
         from piexif import ImageIFD, ExifIFD
@@ -251,24 +266,41 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
             else:
                 exif_dict = {"0th": {}, "1st": {}, "Exif": {}, "GPS": {}, "thumbnail": None}
             
-            # Add processing marker to keyword list
-            all_keywords = list(keywords) if keywords else []
-            if PROCESSED_MARKER not in all_keywords:
-                all_keywords.append(PROCESSED_MARKER)
-            
-            keywords_str = ", ".join(all_keywords)
+            # Write AI keywords to XPKeywords (always)
+            keywords_str = ", ".join(keywords) if keywords else "AI analyzed"
             description = ai_raw_response[:500] if len(ai_raw_response) > 500 else ai_raw_response
             
+            # Write AI keywords
             exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
             exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
+            
+            # Write processing marker based on -x flag
+            if use_xpcomment:
+                # Write marker ONLY to XPComment
+                comment_text = f"Processed: {marker}" if marker else "AI processed"
+                exif_dict["0th"][ImageIFD.XPComment] = comment_text.encode('utf-16le')
+                marker_location = "XPComment"
+            else:
+                # Write marker to XPKeywords (append to keywords list)
+                all_keywords = list(keywords) if keywords else []
+                if marker and marker not in all_keywords:
+                    all_keywords.append(marker)
+                    keywords_str = ", ".join(all_keywords)
+                    exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
+                    exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
+                marker_location = "XPKeywords"
+            
+            # Other standard fields
             exif_dict["0th"][ImageIFD.ImageDescription] = description.encode('utf-8')
             exif_dict["Exif"][ExifIFD.UserComment] = description.encode('utf-8')
             
             if verbose:
                 print(f"\n  [VERBOSE] Writing EXIF fields:")
                 print(f"    XPKeywords: {keywords_str}")
+                if use_xpcomment:
+                    print(f"    XPComment: Processed: {marker}")
                 print(f"    ImageDescription: {description[:50]}...")
-                print(f"    Processing marker: '{PROCESSED_MARKER}' included")
+                print(f"    Processing marker '{marker}' in: {marker_location}")
             
             exif_bytes = piexif.dump(exif_dict)
             
@@ -292,7 +324,8 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
         print(f"      ⚠️  Metadata write failed: {e}")
         return False
 
-def process_images(input_dir, overwrite=False, verbose=False, force=False):
+def process_images(input_dir, overwrite=False, verbose=False, force=False, 
+                   env_file=None, marker=None, use_xpcomment=False):
     input_path = Path(input_dir).resolve()
     
     if not input_path.is_dir():
@@ -305,18 +338,20 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False):
         print(f"{'='*70}")
     
     print(f"\n{'='*70}")
-    print("IMAGE KEYWORD EXTRACTOR - Venice.ai")
+    print("IMAGETAGGER - Venice.ai Image Keyword Extractor")
     print(f"{'='*70}")
     
     try:
-        config = VeniceConfig()
+        config = VeniceConfig(env_file_path=env_file)
         print(f"Model:  {config.model}")
         print(f"Vision: {'Yes' if config.is_vision else 'No (text-only)'}")
         print(f"Input:  {input_path}")
         mode_desc = "Overwrite original files" if overwrite else "Create copies in enriched subfolder"
         print(f"Mode:   {mode_desc}")
+        print(f"Marker: '{marker}'")
+        print(f"Marker field: {'XPComment' if use_xpcomment else 'XPKeywords (in keyword list)'}")
         if force:
-            print(f"Force:  Yes (reprocessing all images)")
+            print(f"Force:  Yes (reprocessing all)")
         print(f"{'='*70}\n")
     except Exception as e:
         print(f"Config Error: {e}")
@@ -342,16 +377,16 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False):
         
         # Check if already processed (unless --force is used)
         if not force:
-            already_done = check_already_processed(img_file)
+            already_done = check_already_processed(img_file, marker, use_xpcomment)
             if already_done:
-                print(f"  ⏭️  SKIPPED - Already processed ('{PROCESSED_MARKER}' marker found)")
+                print(f"  ⏭️  SKIPPED - Already processed ('{marker}' marker found)")
                 skipped += 1
                 continue
             
             # Also check enriched copy if not in overwrite mode
             if not overwrite:
                 enriched_check = input_path / "enriched" / f"{img_file.stem}_enriched{img_file.suffix}"
-                if enriched_check.exists() and check_already_processed(enriched_check):
+                if enriched_check.exists() and check_already_processed(enriched_check, marker, use_xpcomment):
                     print(f"  ⏭️  SKIPPED - Enriched copy already exists")
                     skipped += 1
                     continue
@@ -404,7 +439,10 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False):
 
             target_to_write = temp_file if temp_file else final_output
             
-            success = save_with_new_metadata(img_file, target_to_write, keywords, ai_response, orig_exif, verbose=verbose)
+            success = save_with_new_metadata(
+                img_file, target_to_write, keywords, ai_response, 
+                orig_exif, verbose=verbose, marker=marker, use_xpcomment=use_xpcomment
+            )
             
             if success:
                 if overwrite:
@@ -412,7 +450,8 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False):
                     print(f"  ✅ Overwritten: {final_output.name}")
                 else:
                     print(f"  ✅ Enriched: {final_output.name}")
-                print(f"  ✅ Keywords embedded in EXIF (with '{PROCESSED_MARKER}' marker)")
+                field_name = "XPComment" if use_xpcomment else "XPKeywords"
+                print(f"  ✅ Keywords embedded in EXIF (marker '{marker}' in {field_name})")
                 processed += 1
             else:
                 if overwrite and target_to_write.exists():
@@ -428,6 +467,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False):
             with open(analysis_file, 'w', encoding='utf-8') as f:
                 f.write(f"Source: {img_file.name}\n")
                 f.write(f"Model: {config.model}\n")
+                f.write(f"Marker: {marker} ({'XPComment' if use_xpcomment else 'XPKeywords'})\n")
                 f.write(f"{'='*50}\n")
                 f.write("KEYWORDS:\n")
                 f.write(", ".join(keywords) if keywords else "No keywords extracted")
@@ -457,8 +497,18 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich image files with AI-generated keywords using Venice.ai.",
-        formatter_class=argparse.RawTextHelpFormatter
+        prog='imagetagger',
+        description="Tag images with AI-generated keywords using Venice.ai vision models.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+Examples:
+  python imagetagger.py                          # Process current directory
+  python imagetagger.py -d ./photos             # Process specific directory  
+  python imagetagger.py -e C:\\\\config\\\\env.txt   # Use specific env file
+  python imagetagger.py -t "processed"          # Use custom marker tag
+  python imagetagger.py -x                      # Store marker ONLY in XPComment field
+  python imagetagger.py -f                      # Force reprocess all images
+        """
     )
     parser.add_argument(
         '-d', '--directory',
@@ -467,27 +517,48 @@ def main():
         help='Directory containing images to process (default: current directory)'
     )
     parser.add_argument(
+        '-e', '--env',
+        type=str,
+        default=None,
+        help=f'Path to environment file with API key (default: script directory/{DEFAULT_ENV_FILE})'
+    )
+    parser.add_argument(
         '-o', '--overwrite',
         action='store_true',
-        help='Overwrite original images instead of creating copies.'
+        help='Overwrite original images instead of creating copies'
     )
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
-        help='Enable verbose output (API details, all EXIF tags, etc.).'
+        help='Enable verbose output (API details, all EXIF tags, etc.)'
     )
     parser.add_argument(
         '-f', '--force',
         action='store_true',
-        help='Force reprocessing of all images, even if already processed.'
+        help='Force reprocessing of all images, even if already processed'
     )
+    parser.add_argument(
+        '-t', '--tag',
+        type=str,
+        default=DEFAULT_TAG,
+        help=f'Custom marker tag for processed images (default: {DEFAULT_TAG})'
+    )
+    parser.add_argument(
+        '-x', '--xpcomment',
+        action='store_true',
+        help='Store marker ONLY in XPComment field (not in keywords list)'
+    )
+    
     args = parser.parse_args()
 
     process_images(
         input_dir=args.directory,
         overwrite=args.overwrite,
         verbose=args.verbose,
-        force=args.force
+        force=args.force,
+        env_file=args.env,
+        marker=args.tag,
+        use_xpcomment=args.xpcomment
     )
 
 if __name__ == "__main__":

@@ -61,49 +61,99 @@ class VeniceConfig:
             "Content-Type": "application/json"
         }
 
-def check_already_processed(image_path, marker, use_xpcomment=False):
+def check_already_processed(image_path, marker, use_xpcomment=False, verbose=False):
     """
     Check if image has already been processed by looking for the marker
     either in XPComment (if use_xpcomment=True) or XPKeywords (if use_xpcomment=False).
+    Returns True if marker found, False otherwise.
     """
     try:
         import piexif
         
         with Image.open(image_path) as img:
             if 'exif' not in img.info:
+                if verbose:
+                    print(f"      [DEBUG] No EXIF data found in {image_path.name}")
                 return False
             
             exif_dict = piexif.load(img.info['exif'])
             
             if use_xpcomment:
-                # Check ONLY XPComment field
+                # Check XPComment field
                 xp_comment_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPComment, None)
-                if xp_comment_raw:
-                    if isinstance(xp_comment_raw, bytes):
-                        comment_str = xp_comment_raw.decode('utf-16le', errors='ignore')
-                    else:
-                        comment_str = str(xp_comment_raw)
-                    return marker.lower() in comment_str.lower()
-                return False
-            else:
-                # Check ONLY XPKeywords field
-                xp_keywords_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords, None)
-                if xp_keywords_raw is None:
+                if xp_comment_raw is None:
+                    if verbose:
+                        print(f"      [DEBUG] No XPComment field found")
                     return False
                 
-                if isinstance(xp_keywords_raw, bytes):
-                    keywords_str = xp_keywords_raw.decode('utf-16le', errors='ignore')
-                else:
-                    keywords_str = str(xp_keywords_raw)
+                try:
+                    # XPComment can be tuple (from piexif) or bytes
+                    if isinstance(xp_comment_raw, tuple):
+                        # Convert tuple of integers to bytes
+                        comment_bytes = bytes(xp_comment_raw)
+                        comment_str = comment_bytes.decode('utf-16le', errors='ignore').strip()
+                    elif isinstance(xp_comment_raw, bytes):
+                        comment_str = xp_comment_raw.decode('utf-16le', errors='ignore').strip()
+                    else:
+                        comment_str = str(xp_comment_raw).strip()
+                    
+                    if verbose:
+                        print(f"      [DEBUG] XPComment value: '{comment_str}'")
+                        print(f"      [DEBUG] Looking for marker: '{marker}'")
+                    
+                    return marker.lower() in comment_str.lower()
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"      [DEBUG] Error decoding XPComment: {e}")
+                        print(f"      [DEBUG] Raw XPComment type: {type(xp_comment_raw)}, value: {xp_comment_raw}")
+                    return False
+            else:
+                # Check XPKeywords field
+                xp_keywords_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords, None)
+                if xp_keywords_raw is None:
+                    if verbose:
+                        print(f"      [DEBUG] No XPKeywords field found")
+                    return False
                 
-                existing_keywords = [k.strip().lower() for k in keywords_str.split(',')]
-                return marker.lower() in existing_keywords
-            
+                try:
+                    # XPKeywords can be tuple (from piexif) or bytes
+                    if isinstance(xp_keywords_raw, tuple):
+                        # Convert tuple of integers to bytes
+                        keywords_bytes = bytes(xp_keywords_raw)
+                        keywords_str = keywords_bytes.decode('utf-16le', errors='ignore').strip()
+                    elif isinstance(xp_keywords_raw, bytes):
+                        keywords_str = xp_keywords_raw.decode('utf-16le', errors='ignore').strip()
+                    else:
+                        keywords_str = str(xp_keywords_raw).strip()
+                    
+                    if verbose:
+                        print(f"      [DEBUG] XPKeywords value: '{keywords_str}'")
+                        print(f"      [DEBUG] Looking for marker: '{marker}'")
+                    
+                    # Split by comma and clean each keyword
+                    keywords_list = [k.strip().lower() for k in keywords_str.split(',')]
+                    if verbose:
+                        print(f"      [DEBUG] Keywords list: {keywords_list}")
+                    return marker.lower() in keywords_list
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"      [DEBUG] Error decoding XPKeywords: {e}")
+                        print(f"      [DEBUG] Raw XPKeywords type: {type(xp_keywords_raw)}, value: {xp_keywords_raw}")
+                    return False
+                
     except ImportError:
+        if verbose:
+            print("      [DEBUG] piexif not installed")
         return False
-    except Exception:
+    except Exception as e:
+        if verbose:
+            print(f"      [DEBUG] Error checking EXIF: {e}")
+            import traceback
+            traceback.print_exc()
         return False
-
+    
 def resize_for_api(image_path):
     """Resize and encode to base64"""
     with Image.open(image_path) as img:
@@ -277,7 +327,7 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
             # Write processing marker based on -x flag
             if use_xpcomment:
                 # Write marker ONLY to XPComment
-                comment_text = f"Processed: {marker}" if marker else "AI processed"
+                comment_text = f"Processed by ImageTagger: {marker}" if marker else "Processed by ImageTagger"
                 exif_dict["0th"][ImageIFD.XPComment] = comment_text.encode('utf-16le')
                 marker_location = "XPComment"
             else:
@@ -298,7 +348,7 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
                 print(f"\n  [VERBOSE] Writing EXIF fields:")
                 print(f"    XPKeywords: {keywords_str}")
                 if use_xpcomment:
-                    print(f"    XPComment: Processed: {marker}")
+                    print(f"    XPComment: {comment_text}")
                 print(f"    ImageDescription: {description[:50]}...")
                 print(f"    Processing marker '{marker}' in: {marker_location}")
             
@@ -377,7 +427,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
         
         # Check if already processed (unless --force is used)
         if not force:
-            already_done = check_already_processed(img_file, marker, use_xpcomment)
+            already_done = check_already_processed(img_file, marker, use_xpcomment, verbose)
             if already_done:
                 print(f"  ⏭️  SKIPPED - Already processed ('{marker}' marker found)")
                 skipped += 1
@@ -386,10 +436,12 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             # Also check enriched copy if not in overwrite mode
             if not overwrite:
                 enriched_check = input_path / "enriched" / f"{img_file.stem}_enriched{img_file.suffix}"
-                if enriched_check.exists() and check_already_processed(enriched_check, marker, use_xpcomment):
-                    print(f"  ⏭️  SKIPPED - Enriched copy already exists")
-                    skipped += 1
-                    continue
+                if enriched_check.exists():
+                    already_enriched = check_already_processed(enriched_check, marker, use_xpcomment, verbose)
+                    if already_enriched:
+                        print(f"  ⏭️  SKIPPED - Enriched copy already processed")
+                        skipped += 1
+                        continue
         
         temp_file = None
         

@@ -1,8 +1,16 @@
-Here is the complete `README.md` file as a single document:
-
 # ImageTagger
 
-A Python CLI tool that uses Venice.ai vision models to automatically analyze images and embed AI-generated keywords into EXIF metadata.
+A Python CLI tool that uses Venice.ai vision models to automatically analyze images and embed AI-generated keywords into EXIF metadata. The tool has been observed working against OpenAI API and suitable vision models as well: Just set up url and api_key in the env.txt file.
+
+These are good parameters with Venice API:
+api_base=https://api.venice.ai/api/v1
+model=google-gemma-3-27b-it
+
+These work with OpenAI API:
+api_base=https://api.openai.com/v1
+model=gpt-4o-mini
+
+Other providers probably work just as well.
 
 ## Features
 
@@ -41,6 +49,8 @@ pip install -r requirements.txt
 ### Dependencies
 
 ```
+requirements.txt:
+
 Pillow>=10.0.0
 requests>=2.31.0
 piexif>=1.1.3

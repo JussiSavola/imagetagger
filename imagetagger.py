@@ -20,7 +20,7 @@ DEFAULT_ENV_FILE = "env.txt"
 
 # Venice.ai specific constants
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
-VISION_KEYWORDS = ['vision', 'vl', 'llava', 'gemma', 'qwen2.5-vl', 'dolphin-vision', 'llava-1.6', 'qwen-vl']
+VISION_KEYWORDS = ['vision', 'vl', 'llava', 'gemma', 'qwen2.5-vl', 'dolphin-vision', 'llava-1.6', 'qwen-vl', 'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo']
 
 class VeniceConfig:
     def __init__(self, env_file_path=None):
@@ -462,21 +462,28 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             b64, orig_sz, new_sz = resize_for_api(img_file)
             print(f"  {orig_sz[0]}x{orig_sz[1]} → {new_sz[0]}x{new_sz[1]}")
             
-            # 3. Get Keywords
+# 3. Get Keywords
             print(f"\n🤖 EXTRACTING KEYWORDS")
             meta_text = ", ".join(meta['ai_context'])
             ai_response, keywords = call_venice_for_keywords(b64, meta_text, config, verbose=verbose)
             
-            if keywords:
-                print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
-                if len(keywords) > 5:
-                    print(f"     ({len(keywords)} total)")
-            else:
-                print(f"  ⚠️  No keywords parsed")
-                if ai_response.startswith("ERROR"):
-                    print(f"     {ai_response}")
-                    errors += 1
+            # CRITICAL: Check for API errors OR Content Refusals before touching files
+            is_error = ai_response.startswith("ERROR") or ai_response.startswith("EXCEPTION")
+            is_refusal = not keywords or "sorry" in ai_response.lower() or "can't" in ai_response.lower() or "cannot" in ai_response.lower()
             
+            if is_error or is_refusal:
+                print(f"  ❌ FAILED: {ai_response}")
+                print(f"  ⏭️  SKIPPING - Metadata left untouched due to error/refusal")
+                errors += 1
+                continue # Skip to next image immediately
+            
+            print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
+            if len(keywords) > 5:
+                print(f"     ({len(keywords)} total)")
+
+            # 4. Save
+            print(f"\n💾 SAVING")
+
             # 4. Save
             print(f"\n💾 SAVING")
             

@@ -1,3 +1,4 @@
+
 import os
 import base64
 import io
@@ -61,11 +62,41 @@ class VeniceConfig:
             "Content-Type": "application/json"
         }
 
+def decode_piexif_value(raw_value):
+    """
+    Helper to decode values from piexif.
+    Piexif returns XP fields as tuples of integers (bytes).
+    """
+    if raw_value is None:
+        return ""
+    
+    # Case 1: It's a tuple of integers (common in piexif for XP fields)
+    if isinstance(raw_value, tuple):
+        try:
+            # Convert tuple of ints to bytes, then decode UTF-16LE
+            return bytes(raw_value).decode('utf-16le', errors='ignore').strip()
+        except Exception:
+            # Fallback if tuple contains non-integers or fails
+            return str(raw_value)
+    
+    # Case 2: It's already bytes
+    elif isinstance(raw_value, bytes):
+        try:
+            # Try UTF-16LE first (standard for XP fields)
+            # Check for BOM or typical UTF-16 patterns
+            if len(raw_value) >= 2 and (raw_value[1] == 0 or raw_value[0] == 0):
+                return raw_value.decode('utf-16le', errors='ignore').strip()
+            # Fallback to UTF-8 or ASCII
+            return raw_value.decode('utf-8', errors='ignore').strip()
+        except Exception:
+            return str(raw_value)
+    
+    # Case 3: It's already a string or something else
+    return str(raw_value).strip()
+
 def check_already_processed(image_path, marker, use_xpcomment=False, verbose=False):
     """
-    Check if image has already been processed by looking for the marker
-    either in XPComment (if use_xpcomment=True) or XPKeywords (if use_xpcomment=False).
-    Returns True if marker found, False otherwise.
+    Check if image has already been processed by looking for the marker.
     """
     try:
         import piexif
@@ -73,75 +104,51 @@ def check_already_processed(image_path, marker, use_xpcomment=False, verbose=Fal
         with Image.open(image_path) as img:
             if 'exif' not in img.info:
                 if verbose:
-                    print(f"      [DEBUG] No EXIF data found in {image_path.name}")
+                    print(f"      [DEBUG] No EXIF data found")
                 return False
             
             exif_dict = piexif.load(img.info['exif'])
             
+            target_value = None
+            
             if use_xpcomment:
                 # Check XPComment field
-                xp_comment_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPComment, None)
-                if xp_comment_raw is None:
+                raw_val = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPComment)
+                if raw_val:
+                    target_value = decode_piexif_value(raw_val)
+                    if verbose:
+                        print(f"      [DEBUG] XPComment decoded: '{target_value}'")
+                else:
                     if verbose:
                         print(f"      [DEBUG] No XPComment field found")
                     return False
-                
-                try:
-                    # XPComment can be tuple (from piexif) or bytes
-                    if isinstance(xp_comment_raw, tuple):
-                        # Convert tuple of integers to bytes
-                        comment_bytes = bytes(xp_comment_raw)
-                        comment_str = comment_bytes.decode('utf-16le', errors='ignore').strip()
-                    elif isinstance(xp_comment_raw, bytes):
-                        comment_str = xp_comment_raw.decode('utf-16le', errors='ignore').strip()
-                    else:
-                        comment_str = str(xp_comment_raw).strip()
-                    
-                    if verbose:
-                        print(f"      [DEBUG] XPComment value: '{comment_str}'")
-                        print(f"      [DEBUG] Looking for marker: '{marker}'")
-                    
-                    return marker.lower() in comment_str.lower()
-                    
-                except Exception as e:
-                    if verbose:
-                        print(f"      [DEBUG] Error decoding XPComment: {e}")
-                        print(f"      [DEBUG] Raw XPComment type: {type(xp_comment_raw)}, value: {xp_comment_raw}")
-                    return False
             else:
                 # Check XPKeywords field
-                xp_keywords_raw = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords, None)
-                if xp_keywords_raw is None:
+                raw_val = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords)
+                if raw_val:
+                    target_value = decode_piexif_value(raw_val)
+                    if verbose:
+                        print(f"      [DEBUG] XPKeywords decoded: '{target_value}'")
+                else:
                     if verbose:
                         print(f"      [DEBUG] No XPKeywords field found")
                     return False
-                
-                try:
-                    # XPKeywords can be tuple (from piexif) or bytes
-                    if isinstance(xp_keywords_raw, tuple):
-                        # Convert tuple of integers to bytes
-                        keywords_bytes = bytes(xp_keywords_raw)
-                        keywords_str = keywords_bytes.decode('utf-16le', errors='ignore').strip()
-                    elif isinstance(xp_keywords_raw, bytes):
-                        keywords_str = xp_keywords_raw.decode('utf-16le', errors='ignore').strip()
-                    else:
-                        keywords_str = str(xp_keywords_raw).strip()
-                    
-                    if verbose:
-                        print(f"      [DEBUG] XPKeywords value: '{keywords_str}'")
-                        print(f"      [DEBUG] Looking for marker: '{marker}'")
-                    
-                    # Split by comma and clean each keyword
-                    keywords_list = [k.strip().lower() for k in keywords_str.split(',')]
+
+            if verbose:
+                print(f"      [DEBUG] Looking for marker: '{marker}'")
+
+            if target_value:
+                # Split by comma for keywords list mode
+                if not use_xpcomment:
+                    keywords_list = [k.strip().lower() for k in target_value.split(',')]
                     if verbose:
                         print(f"      [DEBUG] Keywords list: {keywords_list}")
                     return marker.lower() in keywords_list
-                    
-                except Exception as e:
-                    if verbose:
-                        print(f"      [DEBUG] Error decoding XPKeywords: {e}")
-                        print(f"      [DEBUG] Raw XPKeywords type: {type(xp_keywords_raw)}, value: {xp_keywords_raw}")
-                    return False
+                else:
+                    # Direct substring search for XPComment
+                    return marker.lower() in target_value.lower()
+            
+            return False
                 
     except ImportError:
         if verbose:
@@ -150,10 +157,8 @@ def check_already_processed(image_path, marker, use_xpcomment=False, verbose=Fal
     except Exception as e:
         if verbose:
             print(f"      [DEBUG] Error checking EXIF: {e}")
-            import traceback
-            traceback.print_exc()
         return False
-    
+
 def resize_for_api(image_path):
     """Resize and encode to base64"""
     with Image.open(image_path) as img:
@@ -223,7 +228,6 @@ Rules:
     if verbose:
         print(f"\n  [VERBOSE] API Request Payload:")
         print(f"    Model: {config.model}")
-        print(f"    Message Count: {len(payload['messages'])}")
     
     max_retries = 3
     base_delay = 1
@@ -320,15 +324,13 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
             keywords_str = ", ".join(keywords) if keywords else "AI analyzed"
             description = ai_raw_response[:500] if len(ai_raw_response) > 500 else ai_raw_response
             
-            # Write AI keywords
-            exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
-            exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
-            
             # Write processing marker based on -x flag
             if use_xpcomment:
                 # Write marker ONLY to XPComment
                 comment_text = f"Processed by ImageTagger: {marker}" if marker else "Processed by ImageTagger"
                 exif_dict["0th"][ImageIFD.XPComment] = comment_text.encode('utf-16le')
+                # Write clean keywords to XPKeywords
+                exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
                 marker_location = "XPComment"
             else:
                 # Write marker to XPKeywords (append to keywords list)
@@ -336,9 +338,12 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
                 if marker and marker not in all_keywords:
                     all_keywords.append(marker)
                     keywords_str = ", ".join(all_keywords)
-                    exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
-                    exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
+                
+                exif_dict["0th"][ImageIFD.XPKeywords] = keywords_str.encode('utf-16le')
                 marker_location = "XPKeywords"
+            
+            # Always write to XPSubject as well (copy of keywords)
+            exif_dict["0th"][ImageIFD.XPSubject] = keywords_str.encode('utf-16le')
             
             # Other standard fields
             exif_dict["0th"][ImageIFD.ImageDescription] = description.encode('utf-8')
@@ -526,7 +531,15 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 f.write(f"\n{'='*50}\n")
                 f.write("RAW AI RESPONSE:\n")
                 f.write(ai_response)
-            print(f"  📝 Log: {analysis_file.relative_to(Path.cwd())}")
+
+            
+            # Safe path printing: use relative path if possible, otherwise absolute
+            try:
+                log_display_path = analysis_file.relative_to(Path.cwd())
+            except ValueError:
+                log_display_path = analysis_file
+            
+            print(f"  📝 Log: {log_display_path}")
             
         except Exception as e:
             print(f"\n  ❌ ERROR: {e}")

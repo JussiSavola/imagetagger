@@ -285,9 +285,11 @@ Rules:
                     if key.lower().startswith('x-') or key.lower() == 'cf-ray':
                         print(f"    {key}: {value}")
 
-            balance_usd = response.headers.get('x-venice-balance-usd')
-            if balance_usd:
-                print(f"    💰 Balance: ${float(balance_usd):.4f}")
+            balance_usd = None
+            raw_balance = response.headers.get('x-venice-balance-usd')
+            if raw_balance:
+                balance_usd = float(raw_balance)
+                print(f"    💰 Balance: ${balance_usd:.4f}")
 
             deprecation = response.headers.get('x-venice-model-deprecation-warning')
             if deprecation:
@@ -303,7 +305,7 @@ Rules:
                     print(f"\n  [VERBOSE] Raw AI Response:\n  {content}")
 
                 keywords = parse_keywords(content)
-                return content, keywords
+                return content, keywords, balance_usd
 
             elif response.status_code == 429:
                 _throttle_delay *= 1.1
@@ -325,16 +327,16 @@ Rules:
                 continue
 
             elif response.status_code == 401:
-                return "ERROR_401: Invalid API key", []
+                return "ERROR_401: Invalid API key", [], balance_usd
             elif response.status_code == 404:
-                return f"ERROR_404: Model '{config.model}' not found", []
+                return f"ERROR_404: Model '{config.model}' not found", [], balance_usd
             elif response.status_code == 400:
                 error_data = response.json() if response.text else {}
                 msg = error_data.get('error', {}).get('message', response.text[:200])
-                return f"ERROR_400: {msg}", []
+                return f"ERROR_400: {msg}", [], balance_usd
             else:
                 cf_ray = response.headers.get('CF-RAY', 'N/A')
-                return f"ERROR_{response.status_code}: CF-RAY={cf_ray}", []
+                return f"ERROR_{response.status_code}: CF-RAY={cf_ray}", [], balance_usd
 
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
@@ -342,11 +344,11 @@ Rules:
                 print(f"    ⏳ Timeout. Retrying in {delay}s...")
                 time.sleep(delay)
                 continue
-            return "ERROR: Request timeout after retries", []
+            return "ERROR: Request timeout after retries", [], None
         except Exception as e:
-            return f"EXCEPTION: {str(e)}", []
+            return f"EXCEPTION: {str(e)}", [], None
 
-    return "ERROR: Max retries exceeded", []
+    return "ERROR: Max retries exceeded", [], None
 
 def parse_keywords(ai_response):
     cleaned = ai_response.replace("Keywords:", "").replace("Tags:", "")
@@ -523,8 +525,8 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
 # 3. Get Keywords
             print(f"\n🤖 EXTRACTING KEYWORDS")
             meta_text = ", ".join(meta['ai_context'])
-            ai_response, keywords = call_venice_for_keywords(b64, meta_text, config, verbose=verbose)
-            
+            ai_response, keywords, balance = call_venice_for_keywords(b64, meta_text, config, verbose=verbose)
+
             # CRITICAL: Check for API errors OR Content Refusals before touching files
             is_error = ai_response.startswith("ERROR") or ai_response.startswith("EXCEPTION")
             is_refusal = not keywords or "sorry" in ai_response.lower() or "can't" in ai_response.lower() or "cannot" in ai_response.lower()
@@ -539,6 +541,18 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 print(f"  ⏭️  SKIPPING - Metadata left untouched due to error/refusal")
                 errors += 1
                 continue # Skip to next image immediately
+
+            # Venice balance checks
+            if balance is not None:
+                if balance < 0.1:
+                    print(f"\n  💸 FATAL: Venice balance ${balance:.4f} is below $0.10 — insufficient funds to continue")
+                    print(f"  🛑 ABORTING")
+                    return
+                elif balance < 0.5:
+                    print(f"\n  ⚠️  WARNING: Venice balance low (${balance:.4f}). Slowing down — waiting 60s before next image")
+                    time.sleep(60)
+                elif balance < 1.0:
+                    print(f"\n  ⚠️  WARNING: Venice balance low (${balance:.4f}). Consider topping up soon")
             
             print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
             if len(keywords) > 5:

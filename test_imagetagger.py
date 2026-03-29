@@ -88,7 +88,7 @@ def test_thinking_stripped_before_keywords(mock_post, mock_sleep, dummy_image, m
     mock_post.return_value = mock_resp
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
 
     assert raw == "cat, dog, tree"
     assert keywords == ["cat", "dog", "tree"]
@@ -342,7 +342,7 @@ def test_api_call_success(mock_post, dummy_image, mock_config):
     mock_post.return_value = mock_response
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
 
     assert keywords == ['sky', 'cloud', 'blue']
     assert raw == 'sky, cloud, blue'
@@ -363,7 +363,7 @@ def test_api_rate_limit_retry(mock_post, mock_sleep, dummy_image, mock_config):
     mock_post.side_effect = [mock_resp_429, mock_resp_200]
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
 
     # Should have retried once
     assert mock_post.call_count == 2
@@ -380,7 +380,7 @@ def test_rate_limit_up_to_10_retries(mock_post, mock_sleep, dummy_image, mock_co
     mock_post.return_value = mock_resp_429
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
 
     assert mock_post.call_count == 10
     assert raw == "ERROR: Max retries exceeded"
@@ -477,7 +477,7 @@ def test_skip_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_f
     MockConfig.return_value = cfg
     
     # Setup Mock API Response
-    mock_call_keywords.return_value = ("tag1, tag2", ["tag1", "tag2"])
+    mock_call_keywords.return_value = ("tag1, tag2", ["tag1", "tag2"], None)
 
     # 1. First Run
     process_images(
@@ -513,7 +513,7 @@ def test_force_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_
     cfg.model = "test"
     cfg.is_vision = True
     MockConfig.return_value = cfg
-    mock_call_keywords.return_value = ("tag1", ["tag1"])
+    mock_call_keywords.return_value = ("tag1", ["tag1"], None)
 
     # 1. First Run
     process_images(str(temp_dir), force=False, env_file=env_file, marker="jms")
@@ -534,12 +534,65 @@ def test_abort_on_invalid_api_key(MockConfig, mock_call, temp_dir, dummy_image, 
     cfg.is_vision = True
     MockConfig.return_value = cfg
 
-    mock_call.return_value = ("ERROR_401: Invalid API key", [])
+    mock_call.return_value = ("ERROR_401: Invalid API key", [], None)
 
     process_images(str(temp_dir), force=True, env_file=env_file)
 
     # API called only once — aborted, did not continue to next image
     assert mock_call.call_count == 1
+
+
+@patch('imagetagger.call_venice_for_keywords')
+@patch('imagetagger.VeniceConfig')
+def test_abort_on_low_balance(MockConfig, mock_call, temp_dir, dummy_image, env_file):
+    """Processing must stop immediately when balance drops below $0.10"""
+    cfg = MagicMock()
+    cfg.model = "test"
+    cfg.is_vision = True
+    MockConfig.return_value = cfg
+
+    mock_call.return_value = ("cat, dog", ["cat", "dog"], 0.05)
+
+    process_images(str(temp_dir), force=True, env_file=env_file)
+
+    assert mock_call.call_count == 1  # aborted after first image
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.call_venice_for_keywords')
+@patch('imagetagger.VeniceConfig')
+def test_slowdown_on_medium_low_balance(MockConfig, mock_call, mock_sleep, temp_dir, dummy_image, env_file):
+    """A 60s extra sleep must be inserted when balance is between $0.10 and $0.50"""
+    cfg = MagicMock()
+    cfg.model = "test"
+    cfg.is_vision = True
+    MockConfig.return_value = cfg
+
+    mock_call.return_value = ("cat, dog", ["cat", "dog"], 0.30)
+
+    process_images(str(temp_dir), force=True, env_file=env_file)
+
+    assert any(c.args[0] == 60 for c in mock_sleep.call_args_list)
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.call_venice_for_keywords')
+@patch('imagetagger.VeniceConfig')
+def test_warning_only_on_low_balance(MockConfig, mock_call, mock_sleep, temp_dir, dummy_image, env_file, capsys):
+    """Only a warning is printed (no sleep) when balance is between $0.50 and $1.00"""
+    cfg = MagicMock()
+    cfg.model = "test"
+    cfg.is_vision = True
+    MockConfig.return_value = cfg
+
+    mock_call.return_value = ("cat, dog", ["cat", "dog"], 0.75)
+
+    process_images(str(temp_dir), force=True, env_file=env_file)
+
+    assert not any(c.args[0] == 60 for c in mock_sleep.call_args_list)
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out
+    assert "0.7500" in captured.out
 
 
 @patch('imagetagger.save_with_new_metadata')
@@ -552,7 +605,7 @@ def test_model_name_appended_to_keywords(MockConfig, mock_call, mock_save, temp_
     cfg.is_vision = True
     MockConfig.return_value = cfg
 
-    mock_call.return_value = ("cat, dog", ["cat", "dog"])
+    mock_call.return_value = ("cat, dog", ["cat", "dog"], None)
     mock_save.return_value = True
 
     process_images(str(temp_dir), force=True, env_file=env_file)
@@ -579,7 +632,7 @@ class TestSafetyFeatures:
         MockConfig.return_value = cfg
         
         # Simulate API Error
-        mock_call.return_value = ("ERROR_401: Invalid API key", [])
+        mock_call.return_value = ("ERROR_401: Invalid API key", [], None)
 
         # Run
         process_images(str(temp_dir), force=True, env_file=env_file)
@@ -599,7 +652,7 @@ class TestSafetyFeatures:
         MockConfig.return_value = cfg
         
         # Simulate Content Refusal
-        mock_call.return_value = ("I'm sorry, but I can't assist with that request.", [])
+        mock_call.return_value = ("I'm sorry, but I can't assist with that request.", [], None)
 
         # Run
         process_images(str(temp_dir), force=True, env_file=env_file)

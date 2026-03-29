@@ -1,35 +1,44 @@
 # ImageTagger
 
-A Python CLI tool that uses Venice.ai vision models to automatically analyze images and embed AI-generated keywords into EXIF metadata. The tool has been observed working against OpenAI API and suitable vision models as well: Just set up url and api_key in the env.txt file.
+A Python CLI tool that uses vision AI models to automatically analyze images and embed AI-generated keywords into EXIF metadata. Works with Venice.ai, OpenAI, and any compatible API provider.
 
 These are good parameters with Venice API:
+```
 api_base=https://api.venice.ai/api/v1
 model=google-gemma-3-27b-it
+```
 
 These work with OpenAI API:
+```
 api_base=https://api.openai.com/v1
 model=gpt-4o-mini
+```
 
-Other providers probably work just as well.
+Other OpenAI-compatible providers work too.
 
 ## Features
 
 - **AI-Powered Keyword Extraction**: Uses vision models to identify objects, scenes, colors, brands, and activities
-- **EXIF Metadata Embedding**: Writes keywords directly into image metadata (XPKeywords, ImageDescription, UserComment)
+- **Model Name in Keywords**: The model used is automatically appended to the keyword list on save
+- **EXIF Metadata Embedding**: Writes keywords directly into image metadata (XPKeywords, XPSubject, ImageDescription, UserComment)
 - **Flexible Output**: Create enriched copies or overwrite originals in-place
 - **Original File Safety**: Atomic writes for overwrite mode to prevent data corruption
-- **Rate Limit Handling**: Exponential backoff for API rate limits
-- **Balance Monitoring**: Real-time Venice.ai balance tracking
+- **Keyword Log**: Saves a `_keywords.txt` log to the `enriched/` folder for every processed image
+- **Rate Limit Handling**: Adaptive throttle delay (increases on rate limit, decreases on success) plus API-directed wait times
+- **Balance Monitoring**: Real-time Venice.ai balance tracking with three tiers — warn at <$1.00, slow down (60s wait) at <$0.50, abort at <$0.10
+- **Abort on Invalid Key**: Immediately stops processing on a 401 Invalid API Key response
+- **Content Refusal Detection**: Skips images where the model refuses to analyze (detects "sorry", "can't", "cannot")
+- **Thinking Block Stripping**: Removes `<think>...</think>` reasoning blocks from model output before parsing
 - **Verbose Mode**: Detailed debugging output for troubleshooting
 - **Prevent Reprocessing**: Uses a configurable marker tag to avoid reprocessing already handled images
 - **Custom Tag Support**: Set a custom marker to identify processed images
-- **Marker Field Selection**: Store marker in XPComment field (-x) or in XPKeywords (default)
+- **Marker Field Selection**: Store marker in XPComment field (`-x`) or in XPKeywords (default)
 - **External Config**: Specify environment file location (useful for packaged executables)
 
 ## Requirements
 
 - Python 3.9+
-- Venice.ai API key
+- An API key for Venice.ai, OpenAI, or a compatible provider
 
 ## Installation
 
@@ -62,14 +71,14 @@ Create an `env.txt` file (by default in the same directory as the script):
 
 ```text
 # Required
-api_key=your-venice-api-key-here
+api_key=your-api-key-here
 
 # Optional (defaults shown)
 api_base=https://api.venice.ai/api/v1
 model=google-gemma-3-27b-it
 ```
 
-Or specify a custom location with `-e` flag.
+Or specify a custom location with the `-e` flag.
 
 ## Usage
 
@@ -120,10 +129,15 @@ python imagetagger.py -d ./photos -o -t "mytag" -x -f -v
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Input Image   │ ──▶ │  Venice.ai API  │ ──▶ │ Enriched Image  │
-│                 │     │  Vision Model   │     │ + EXIF Keywords │
+│   Input Image   │ ──▶ │  Vision AI API  │ ──▶ │ Enriched Image  │
+│                 │     │  (Venice/OAI)   │     │ + EXIF Keywords │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
+
+1. Image is resized to max 800×600 and base64-encoded for the API
+2. The vision model returns a comma-separated keyword list
+3. Keywords are written into EXIF fields; the model name is appended to the list
+4. A text log of the keywords and raw AI response is saved to `enriched/`
 
 ### Marker Storage Modes
 
@@ -141,7 +155,7 @@ python imagetagger.py -d ./photos -o -t "mytag" -x -f -v
 
 ### Reprocessing Prevention
 
-The tool embeds a marker tag (default: "jms") to avoid reprocessing:
+The tool embeds a marker tag (default: `jms`) to avoid reprocessing:
 - **Default (no `-x`)**: Marker added to XPKeywords as part of keyword list
 - **With `-x`**: Marker stored ONLY in XPComment field (not in keywords)
 
@@ -151,26 +165,31 @@ On subsequent runs, images containing this marker in the corresponding field are
 
 | Field | EXIF Tag | Content |
 |-------|----------|---------|
-| XPKeywords | 0x9C9E | Comma-separated AI keywords (Windows compatible) |
-| XPSubject | 0x9C9F | Keywords duplicate |
+| XPKeywords | 0x9C9E | Comma-separated AI keywords + model name (Windows compatible) |
+| XPSubject | 0x9C9F | Same as XPKeywords |
 | XPComment* | 0x9C9A | Processing marker (only with `-x`) |
 | ImageDescription | 0x010E | AI analysis (truncated to 500 chars) |
 | UserComment | 0x9286 | Full AI response |
 
-\* Marker only written if `-x` flag is used. Without `-x`, marker is appended to XPKeywords.
+\* Marker only written to XPComment if `-x` flag is used. Without `-x`, marker is appended to XPKeywords.
 
 ## API Best Practices
 
 This tool implements Venice.ai recommended practices:
 
-- **Rate Limiting**: Monitors `x-ratelimit-remaining-*` headers with exponential backoff
-- **Balance Tracking**: Displays `x-venice-balance-usd` after each request
+- **Adaptive Throttle**: Inter-request delay increases 10% on rate limit, decreases 2% on success (floor: 0.1s)
+- **Rate Limit Headers**: Waits the API-specified reset duration from `x-ratelimit-reset-*` headers on 429 responses, falls back to exponential backoff
+- **Balance Monitoring**: Displays and acts on `x-venice-balance-usd` after each request:
+  - `< $1.00` — warns to top up soon
+  - `< $0.50` — warns and inserts a 60-second wait before the next image
+  - `< $0.10` — aborts immediately
+- **Instant 401 Abort**: Stops processing and exits on an invalid API key
 - **Request Logging**: Captures `CF-RAY` header for support tickets
 - **Deprecation Warnings**: Alerts on `x-venice-model-deprecation-warning`
+- **Venice Parameters**: Sends `disable_thinking`, `strip_thinking_response`, and `include_venice_system_prompt: false` when Venice is detected
+- **Thinking Block Stripping**: Removes `<think>...</think>` sections from model responses before keyword parsing
 
 ## Example Output
-
-### Standard Mode (marker in XPKeywords)
 
 ```
 ======================================================================
@@ -186,28 +205,31 @@ Marker field: XPKeywords (in keyword list)
 
 Found 18 image(s)
 
-----------------------------------------------------------------------
+──────────────────────────────────────────────────────────────────────
 [1/18] DSCF1234.JPG
-----------------------------------------------------------------------
+──────────────────────────────────────────────────────────────────────
 
 📋 EXISTING METADATA
   Format: JPEG | Size: 3840x2160
   [META] Make: Apple
   [META] DateTime: 2024:12:22 16:52:59
 
+🖼️  RESIZING
+  3840x2160 → 800x450
+
 🤖 EXTRACTING KEYWORDS
     💰 Balance: $15.2347
-  ✅ Keywords: car tire, snow chains, winter, snow...
-     (12 total)
+  ✅ Keywords: car tire, snow chains, winter, snow, road...
+     (13 total)
 
 💾 SAVING
   ✅ Enriched: DSCF1234_enriched.JPG
   ✅ Keywords embedded in EXIF (marker 'jms' in XPKeywords)
   📝 Log: enriched\DSCF1234_keywords.txt
 
-----------------------------------------------------------------------
+──────────────────────────────────────────────────────────────────────
 [2/18] DSCF5678.JPG
-----------------------------------------------------------------------
+──────────────────────────────────────────────────────────────────────
   ⏭️  SKIPPED - Already processed ('jms' marker found)
 
 ...
@@ -221,16 +243,9 @@ COMPLETE
 ======================================================================
 ```
 
-### XPComment Mode (`-x` flag)
-
-```
-Marker field: XPComment
-✅ Keywords embedded in EXIF (marker 'jms' in XPComment)
-```
-
 ### Verbose Mode (`-v`)
 
-Shows API headers, all EXIF tags, raw AI responses, and debug information.
+Shows API headers, all EXIF tags, raw AI responses, written EXIF fields, and debug information.
 
 ## Troubleshooting
 
@@ -284,7 +299,7 @@ pip install pyinstaller
 pyinstaller --onefile imagetagger.py
 ```
 
-The resulting `imagetagger.exe` will need `-e` flag to locate the env.txt file unless you bundle it or place env.txt in the same directory as the executable.
+The resulting `imagetagger.exe` will need the `-e` flag to locate `env.txt` unless it is placed in the same directory as the executable.
 
 ## License
 

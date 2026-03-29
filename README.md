@@ -183,7 +183,7 @@ Using Venice.ai (as of 2026-03-29):
 | `qwen3-5-9b` | $0.000028 (~0.003 ¢) | ~$0.03 |
 | `claude-sonnet-4-6` | $0.015 per image (~1.5 ¢) | ~$15 |
 
-Processing a large batch is very cheap — 10 000 images costs roughly $0.30–$0.50 using low end models.
+Processing a large batch is very cheap — 10 000 images costs roughly $0.30–$0.50 using low end models. Claude Sonnet 4.6 produces higher quality results but costs roughly 300–500× more per image.
 
 ## API Best Practices
 

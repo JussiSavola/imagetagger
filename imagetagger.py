@@ -405,7 +405,7 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
             if ext in ('.jpg', '.jpeg'):
                 img.save(output_path, 'JPEG', quality=95, exif=exif_bytes)
             else:
-                img.save(output_path, 'PNG')
+                img.save(output_path, 'PNG', exif=exif_bytes)
                 
         return True
         

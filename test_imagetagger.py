@@ -191,6 +191,37 @@ def test_write_and_check_xpcomment(dummy_image):
     found = check_already_processed(dummy_image, "jms", use_xpcomment=True)
     assert found is True
 
+@pytest.fixture
+def dummy_png(temp_dir):
+    img_path = temp_dir / "test_img.png"
+    img = Image.new('RGB', (100, 100), color='blue')
+    img.save(img_path)
+    return img_path
+
+@pytest.mark.skipif(not PIEXIF_INSTALLED, reason="piexif not installed")
+def test_png_write_and_check_xpkeywords(dummy_png):
+    """Keywords and marker must be written to and read from PNG EXIF"""
+    success = save_with_new_metadata(
+        dummy_png, dummy_png,
+        keywords=["forest", "nature"], ai_raw_response="forest, nature",
+        marker="jms", use_xpcomment=False
+    )
+    assert success is True
+    found = check_already_processed(dummy_png, "jms", use_xpcomment=False)
+    assert found is True
+
+@pytest.mark.skipif(not PIEXIF_INSTALLED, reason="piexif not installed")
+def test_png_write_and_check_xpcomment(dummy_png):
+    """Marker stored in XPComment must survive a PNG round-trip"""
+    success = save_with_new_metadata(
+        dummy_png, dummy_png,
+        keywords=["sky"], ai_raw_response="sky",
+        marker="jms", use_xpcomment=True
+    )
+    assert success is True
+    found = check_already_processed(dummy_png, "jms", use_xpcomment=True)
+    assert found is True
+
 @pytest.mark.skipif(not PIEXIF_INSTALLED, reason="piexif not installed")
 def test_check_negative(dummy_image):
     # Fresh image, no marker

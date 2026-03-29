@@ -12,7 +12,7 @@ import importlib.util
 # Import the module to test
 import imagetagger
 from imagetagger import (
-    VeniceConfig,
+    APIConfig,
     parse_keywords,
     parse_ratelimit_reset,
     strip_thinking,
@@ -117,7 +117,7 @@ def test_thinking_stripped_before_keywords(mock_post, mock_sleep, dummy_image, m
     mock_post.return_value = mock_resp
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     assert raw == "cat, dog, tree"
     assert keywords == ["cat", "dog", "tree"]
@@ -126,7 +126,7 @@ def test_thinking_stripped_before_keywords(mock_post, mock_sleep, dummy_image, m
 @patch('imagetagger.time.sleep')
 @patch('imagetagger.requests.post')
 def test_venice_parameters_sent_for_venice_api(mock_post, mock_sleep, dummy_image, mock_config):
-    """venice_parameters block is included in payload when using Venice API"""
+    """venice_parameters block is included in payload when is_venice is True"""
     mock_config.is_venice = True
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -135,7 +135,7 @@ def test_venice_parameters_sent_for_venice_api(mock_post, mock_sleep, dummy_imag
     mock_post.return_value = mock_resp
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     payload = mock_post.call_args[1]['json']
     assert 'venice_parameters' in payload
@@ -146,7 +146,7 @@ def test_venice_parameters_sent_for_venice_api(mock_post, mock_sleep, dummy_imag
 @patch('imagetagger.time.sleep')
 @patch('imagetagger.requests.post')
 def test_venice_parameters_not_sent_for_other_api(mock_post, mock_sleep, dummy_image, mock_config):
-    """venice_parameters block is NOT included when using a non-Venice API"""
+    """venice_parameters block is NOT included when is_venice is False"""
     mock_config.is_venice = False
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -155,7 +155,7 @@ def test_venice_parameters_not_sent_for_other_api(mock_post, mock_sleep, dummy_i
     mock_post.return_value = mock_resp
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     payload = mock_post.call_args[1]['json']
     assert 'venice_parameters' not in payload
@@ -202,7 +202,7 @@ def test_429_uses_header_reset_time(mock_post, mock_sleep, dummy_image, mock_con
     mock_post.side_effect = [mock_resp_429, mock_resp_200]
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     # The retry sleep should be ~64.637s (from the header), not the default 1s backoff
     retry_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
@@ -225,7 +225,7 @@ def test_429_fallback_to_backoff_without_headers(mock_post, mock_sleep, dummy_im
     mock_post.side_effect = [mock_resp_429, mock_resp_200]
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     retry_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
     assert retry_sleeps[0] == 1  # first attempt: 1s backoff
@@ -338,7 +338,7 @@ def test_check_wrong_marker(dummy_image):
 # --- Config Tests ---
 
 def test_config_loading(env_file):
-    config = VeniceConfig(env_file_path=env_file)
+    config = APIConfig(env_file_path=env_file)
     assert config.api_key == "TEST_API_KEY"
     assert config.model == "test-model"
 
@@ -346,7 +346,7 @@ def test_vision_detection(temp_dir):
     env_path = temp_dir / "env_vision.txt"
     env_path.write_text("api_key=key\nmodel=llava-vision")
     
-    config = VeniceConfig(env_file_path=env_path)
+    config = APIConfig(env_file_path=env_path)
     assert config.is_vision is True
 
 # --- API Mocking Tests ---
@@ -371,7 +371,7 @@ def test_api_call_success(mock_post, dummy_image, mock_config):
     mock_post.return_value = mock_response
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     assert keywords == ['sky', 'cloud', 'blue']
     assert raw == 'sky, cloud, blue'
@@ -392,7 +392,7 @@ def test_api_rate_limit_retry(mock_post, mock_sleep, dummy_image, mock_config):
     mock_post.side_effect = [mock_resp_429, mock_resp_200]
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     # Should have retried once
     assert mock_post.call_count == 2
@@ -409,7 +409,7 @@ def test_rate_limit_up_to_10_retries(mock_post, mock_sleep, dummy_image, mock_co
     mock_post.return_value = mock_resp_429
 
     b64, _, _ = resize_for_api(dummy_image)
-    raw, keywords, balance = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    raw, keywords, balance = imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     assert mock_post.call_count == 10
     assert raw == "ERROR: Max retries exceeded"
@@ -426,7 +426,7 @@ def test_retry_delay_capped_at_16s(mock_post, mock_sleep, dummy_image, mock_conf
     mock_post.return_value = mock_resp_429
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     # sleep is called for throttle + retry delay each attempt
     retry_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
@@ -452,7 +452,7 @@ def test_throttle_delay_increases_on_429(mock_post, mock_sleep, dummy_image, moc
     mock_post.side_effect = [mock_resp_429, mock_resp_429, mock_resp_200]
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     assert imagetagger._throttle_delay == pytest.approx(0.1 * 1.1 * 1.1 * 0.98, rel=1e-6)
 
@@ -470,7 +470,7 @@ def test_throttle_delay_decreases_on_success(mock_post, mock_sleep, dummy_image,
     mock_post.return_value = mock_resp_200
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     assert imagetagger._throttle_delay == pytest.approx(0.5 * 0.98, rel=1e-6)
 
@@ -488,14 +488,14 @@ def test_throttle_delay_floored_at_0_1(mock_post, mock_sleep, dummy_image, mock_
     mock_post.return_value = mock_resp_200
 
     b64, _, _ = resize_for_api(dummy_image)
-    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+    imagetagger.call_AI_vision_for_keywords(b64, "", mock_config)
 
     assert imagetagger._throttle_delay == pytest.approx(0.1, rel=1e-6)
 
 # --- Workflow Tests ---
 
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_skip_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_file):
     """Test that force=False skips already processed images"""
     
@@ -533,8 +533,8 @@ def test_skip_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_f
     # Verify API was NOT called again
     assert not mock_call_keywords.called
 
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_force_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_file):
     """Test that force=True processes images again"""
     
@@ -554,8 +554,8 @@ def test_force_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_
     # Verify API WAS called again
     assert mock_call_keywords.called
 
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_abort_on_invalid_api_key(MockConfig, mock_call, temp_dir, dummy_image, env_file):
     """Process should abort immediately on 401 Invalid API key, not just skip the image"""
     cfg = MagicMock()
@@ -571,8 +571,8 @@ def test_abort_on_invalid_api_key(MockConfig, mock_call, temp_dir, dummy_image, 
     assert mock_call.call_count == 1
 
 
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_abort_on_low_balance(MockConfig, mock_call, temp_dir, dummy_image, env_file):
     """Processing must stop immediately when balance drops below $0.10"""
     cfg = MagicMock()
@@ -588,8 +588,8 @@ def test_abort_on_low_balance(MockConfig, mock_call, temp_dir, dummy_image, env_
 
 
 @patch('imagetagger.time.sleep')
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_slowdown_on_medium_low_balance(MockConfig, mock_call, mock_sleep, temp_dir, dummy_image, env_file):
     """A 60s extra sleep must be inserted when balance is between $0.10 and $0.50"""
     cfg = MagicMock()
@@ -605,8 +605,8 @@ def test_slowdown_on_medium_low_balance(MockConfig, mock_call, mock_sleep, temp_
 
 
 @patch('imagetagger.time.sleep')
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_warning_only_on_low_balance(MockConfig, mock_call, mock_sleep, temp_dir, dummy_image, env_file, capsys):
     """Only a warning is printed (no sleep) when balance is between $0.50 and $1.00"""
     cfg = MagicMock()
@@ -625,8 +625,8 @@ def test_warning_only_on_low_balance(MockConfig, mock_call, mock_sleep, temp_dir
 
 
 @patch('imagetagger.save_with_new_metadata')
-@patch('imagetagger.call_venice_for_keywords')
-@patch('imagetagger.VeniceConfig')
+@patch('imagetagger.call_AI_vision_for_keywords')
+@patch('imagetagger.APIConfig')
 def test_model_name_appended_to_keywords(MockConfig, mock_call, mock_save, temp_dir, dummy_image, env_file):
     """Model name should be appended to keywords before saving to metadata"""
     cfg = MagicMock()
@@ -650,8 +650,8 @@ class TestSafetyFeatures:
     """Tests to ensure metadata is never corrupted by errors or refusals"""
 
     @patch('imagetagger.save_with_new_metadata')
-    @patch('imagetagger.call_venice_for_keywords')
-    @patch('imagetagger.VeniceConfig')
+    @patch('imagetagger.call_AI_vision_for_keywords')
+    @patch('imagetagger.APIConfig')
     def test_no_write_on_api_error(self, MockConfig, mock_call, mock_save, temp_dir, dummy_image, env_file):
         """Ensure metadata is NOT written if API returns an error code"""
         # Setup Mocks
@@ -670,8 +670,8 @@ class TestSafetyFeatures:
         mock_save.assert_not_called()
 
     @patch('imagetagger.save_with_new_metadata')
-    @patch('imagetagger.call_venice_for_keywords')
-    @patch('imagetagger.VeniceConfig')
+    @patch('imagetagger.call_AI_vision_for_keywords')
+    @patch('imagetagger.APIConfig')
     def test_no_write_on_content_refusal(self, MockConfig, mock_call, mock_save, temp_dir, dummy_image, env_file):
         """Ensure metadata is NOT written if AI refuses content (puritan filter)"""
         # Setup Mocks

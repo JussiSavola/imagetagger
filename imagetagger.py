@@ -26,7 +26,7 @@ SUPPORTED_FORMATS = ('.jpg', '.jpeg', '.png')
 DEFAULT_TAG = "jms"
 DEFAULT_ENV_FILE = "env.txt"
 
-# Venice.ai specific constants
+# API provider constants
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
 
 # Adaptive inter-request throttle delay (seconds). Increases 10% on rate limit,
@@ -34,7 +34,7 @@ VENICE_BASE_URL = "https://api.venice.ai/api/v1"
 _throttle_delay = 0.1
 VISION_KEYWORDS = ['vision', 'vl', 'llava', 'gemma', 'qwen2.5-vl', 'dolphin-vision', 'llava-1.6', 'qwen-vl', 'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo']
 
-class VeniceConfig:
+class APIConfig:
     def __init__(self, env_file_path=None):
         # Determine env file location
         if env_file_path:
@@ -238,7 +238,7 @@ def parse_ratelimit_reset(value):
     return total if total > 0 else None
 
 
-def call_venice_for_keywords(base64_image, metadata_context, config, verbose=False):
+def call_AI_vision_for_keywords(base64_image, metadata_context, config, verbose=False):
     global _throttle_delay
     url = f"{config.base_url}/chat/completions"
     b64_clean = base64_image.strip().replace('\n', '').replace('\r', '')
@@ -518,11 +518,11 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
         print(f"{'='*70}")
     
     print(f"\n{'='*70}")
-    print("IMAGETAGGER - Venice.ai Image Keyword Extractor")
+    print("IMAGETAGGER - AI Image Keyword Extractor")
     print(f"{'='*70}")
     
     try:
-        config = VeniceConfig(env_file_path=env_file)
+        config = APIConfig(env_file_path=env_file)
         print(f"Model:  {config.model}")
         print(f"Vision: {'Yes' if config.is_vision else 'No (text-only)'}")
         print(f"Input:  {input_path}")
@@ -590,7 +590,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
 # 3. Get Keywords
             print(f"\n🤖 EXTRACTING KEYWORDS")
             meta_text = ", ".join(meta['ai_context'])
-            ai_response, keywords, balance = call_venice_for_keywords(b64, meta_text, config, verbose=verbose)
+            ai_response, keywords, balance = call_AI_vision_for_keywords(b64, meta_text, config, verbose=verbose)
 
             # CRITICAL: Check for API errors OR Content Refusals before touching files
             is_error = ai_response.startswith("ERROR") or ai_response.startswith("EXCEPTION")
@@ -607,17 +607,17 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 errors += 1
                 continue # Skip to next image immediately
 
-            # Venice balance checks
+            # API balance/credits checks
             if balance is not None:
                 if balance < 0.1:
-                    print(f"\n  💸 FATAL: Venice balance ${balance:.4f} is below $0.10 — insufficient funds to continue")
+                    print(f"\n  💸 FATAL: API balance ${balance:.4f} is below $0.10 — insufficient funds to continue")
                     print(f"  🛑 ABORTING")
                     return
                 elif balance < 0.5:
-                    print(f"\n  ⚠️  WARNING: Venice balance low (${balance:.4f}). Slowing down — waiting 60s before next image")
+                    print(f"\n  ⚠️  WARNING: API balance low (${balance:.4f}). Slowing down — waiting 60s before next image")
                     time.sleep(60)
                 elif balance < 1.0:
-                    print(f"\n  ⚠️  WARNING: Venice balance low (${balance:.4f}). Consider topping up soon")
+                    print(f"\n  ⚠️  WARNING: API balance low (${balance:.4f}). Consider topping up soon")
             
             print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
             if len(keywords) > 5:
@@ -710,7 +710,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
 def main():
     parser = argparse.ArgumentParser(
         prog='imagetagger',
-        description="Tag images with AI-generated keywords using Venice.ai vision models.",
+        description="Tag images with AI-generated keywords using vision models.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Examples:

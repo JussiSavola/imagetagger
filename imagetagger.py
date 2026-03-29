@@ -503,8 +503,9 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
 
             target_to_write = temp_file if temp_file else final_output
             
+            keywords_with_model = list(keywords) + [config.model]
             success = save_with_new_metadata(
-                img_file, target_to_write, keywords, ai_response, 
+                img_file, target_to_write, keywords_with_model, ai_response,
                 orig_exif, verbose=verbose, marker=marker, use_xpcomment=use_xpcomment
             )
             

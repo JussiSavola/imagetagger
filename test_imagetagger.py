@@ -258,48 +258,27 @@ def test_force_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_
     # Verify API WAS called again
     assert mock_call_keywords.called
 
-class TestSafetyFeatures:
-    """Tests to ensure metadata is never corrupted by errors or refusals"""
+@patch('imagetagger.save_with_new_metadata')
+@patch('imagetagger.call_venice_for_keywords')
+@patch('imagetagger.VeniceConfig')
+def test_model_name_appended_to_keywords(MockConfig, mock_call, mock_save, temp_dir, dummy_image, env_file):
+    """Model name should be appended to keywords before saving to metadata"""
+    cfg = MagicMock()
+    cfg.model = "gpt-4o-mini"
+    cfg.is_vision = True
+    MockConfig.return_value = cfg
 
-    @patch('imagetagger.save_with_new_metadata')
-    @patch('imagetagger.call_venice_for_keywords')
-    @patch('imagetagger.VeniceConfig')
-    def test_no_write_on_api_error(self, MockConfig, mock_call, mock_save, temp_dir, dummy_image, env_file):
-        """Ensure metadata is NOT written if API returns an error code"""
-        # Setup Mocks
-        cfg = MagicMock()
-        cfg.model = "test"
-        cfg.is_vision = True
-        MockConfig.return_value = cfg
-        
-        # Simulate API Error
-        mock_call.return_value = ("ERROR_401: Invalid API key", [])
+    mock_call.return_value = ("cat, dog", ["cat", "dog"])
+    mock_save.return_value = True
 
-        # Run
-        process_images(str(temp_dir), force=True, env_file=env_file)
+    process_images(str(temp_dir), force=True, env_file=env_file)
 
-        # Assert save function was NEVER called
-        mock_save.assert_not_called()
+    assert mock_save.called
+    saved_keywords = mock_save.call_args[0][2]  # 3rd positional arg
+    assert "gpt-4o-mini" in saved_keywords
+    assert "cat" in saved_keywords
+    assert "dog" in saved_keywords
 
-    @patch('imagetagger.save_with_new_metadata')
-    @patch('imagetagger.call_venice_for_keywords')
-    @patch('imagetagger.VeniceConfig')
-    def test_no_write_on_content_refusal(self, MockConfig, mock_call, mock_save, temp_dir, dummy_image, env_file):
-        """Ensure metadata is NOT written if AI refuses content (puritan filter)"""
-        # Setup Mocks
-        cfg = MagicMock()
-        cfg.model = "test"
-        cfg.is_vision = True
-        MockConfig.return_value = cfg
-        
-        # Simulate Content Refusal
-        mock_call.return_value = ("I'm sorry, but I can't assist with that request.", [])
-
-        # Run
-        process_images(str(temp_dir), force=True, env_file=env_file)
-
-        # Assert save function was NEVER called
-        mock_save.assert_not_called()
 
 class TestSafetyFeatures:
     """Tests to ensure metadata is never corrupted by errors or refusals"""

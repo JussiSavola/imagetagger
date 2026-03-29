@@ -58,8 +58,9 @@ class VeniceConfig:
         
         self.base_url = self.config.get('api_base', VENICE_BASE_URL).rstrip('/')
         self.model = self.config.get('model', 'google-gemma-3-27b-it')
-        
+
         self.is_vision = any(v in self.model.lower() for v in VISION_KEYWORDS)
+        self.is_venice = 'venice.ai' in self.base_url
 
     def get_headers(self):
         return {
@@ -205,6 +206,11 @@ def extract_metadata(image_path, verbose=False):
         meta['display_lines'].append(f"  [Error: {e}]")
     return meta
 
+def strip_thinking(content):
+    """Remove <think>...</think> reasoning blocks from model output."""
+    return re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+
+
 def parse_ratelimit_reset(value):
     """Parse an API reset duration string like '1m4.637s', '30s', '500ms' into seconds."""
     if not value:
@@ -238,9 +244,9 @@ Rules:
 
     user_content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_clean}"}},
-        {"type": "text", "text": f"Generate keywords. Metadata context: {metadata_context[:200]}"}
+        {"type": "text", "text": f"Generate keywords. Metadata context: {metadata_context[:200]} /no_think"}
     ]
-    
+
     payload = {
         "model": config.model,
         "messages": [
@@ -250,6 +256,13 @@ Rules:
         "max_tokens": 200,
         "temperature": 0.2
     }
+
+    if config.is_venice:
+        payload["venice_parameters"] = {
+            "include_venice_system_prompt": False,
+            "strip_thinking_response": True,
+            "disable_thinking": True,
+        }
     
     if verbose:
         print(f"\n  [VERBOSE] API Request Payload:")
@@ -282,6 +295,7 @@ Rules:
                 _throttle_delay = max(0.1, _throttle_delay * 0.98)
                 result = response.json()
                 content = result['choices'][0]['message']['content']
+                content = strip_thinking(content)
 
                 if verbose:
                     print(f"\n  [VERBOSE] Raw AI Response:\n  {content}")

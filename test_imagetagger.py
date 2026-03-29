@@ -15,6 +15,7 @@ from imagetagger import (
     VeniceConfig,
     parse_keywords,
     parse_ratelimit_reset,
+    strip_thinking,
     resize_for_api,
     extract_metadata,
     check_already_processed,
@@ -61,6 +62,75 @@ def test_parse_keywords_limit():
     response = ", ".join([f"word{i}" for i in range(30)])
     keywords = parse_keywords(response)
     assert len(keywords) == 20
+
+# --- Thinking stripping ---
+
+@pytest.mark.parametrize("content, expected", [
+    ("<think>Let me think...</think>cat, dog", "cat, dog"),
+    ("<think>\nlong\nmultiline\nthinking\n</think>\ncat, dog", "cat, dog"),
+    ("cat, dog", "cat, dog"),  # no thinking block — unchanged
+    ("<think>nested</think>  cat  ", "cat"),  # whitespace stripped
+])
+def test_strip_thinking(content, expected):
+    assert strip_thinking(content) == expected
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_thinking_stripped_before_keywords(mock_post, mock_sleep, dummy_image, mock_config):
+    """<think> blocks in the API response are removed before keyword parsing"""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {
+        'choices': [{'message': {'content': '<think>reasoning here</think>cat, dog, tree'}}]
+    }
+    mock_post.return_value = mock_resp
+
+    b64, _, _ = resize_for_api(dummy_image)
+    raw, keywords = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    assert raw == "cat, dog, tree"
+    assert keywords == ["cat", "dog", "tree"]
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_venice_parameters_sent_for_venice_api(mock_post, mock_sleep, dummy_image, mock_config):
+    """venice_parameters block is included in payload when using Venice API"""
+    mock_config.is_venice = True
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {'choices': [{'message': {'content': 'cat'}}]}
+    mock_post.return_value = mock_resp
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    payload = mock_post.call_args[1]['json']
+    assert 'venice_parameters' in payload
+    assert payload['venice_parameters']['include_venice_system_prompt'] is False
+    assert payload['venice_parameters']['disable_thinking'] is True
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_venice_parameters_not_sent_for_other_api(mock_post, mock_sleep, dummy_image, mock_config):
+    """venice_parameters block is NOT included when using a non-Venice API"""
+    mock_config.is_venice = False
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {'choices': [{'message': {'content': 'cat'}}]}
+    mock_post.return_value = mock_resp
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    payload = mock_post.call_args[1]['json']
+    assert 'venice_parameters' not in payload
+
 
 # --- Rate-limit reset header parsing ---
 

@@ -310,6 +310,7 @@ Rules:
                     print(f"\n  [VERBOSE] Raw AI Response:\n  {content}")
 
                 keywords = parse_keywords(content)
+                keywords = sanitize_keywords(keywords)
                 return content, keywords, balance_usd
 
             elif response.status_code == 429 or response.status_code == 503:
@@ -372,7 +373,66 @@ def parse_keywords(ai_response):
     
     return clean_list[:20]
 
-def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response, 
+def sanitize_keywords(raw_keywords, max_keywords=20):
+    """
+    Normalize and validate model-produced keywords.
+
+    Returns:
+        clean_keywords: list[str]
+    """
+    clean = []
+    seen = set()
+
+    for k in raw_keywords:
+        if not k:
+            continue
+
+        # Trim whitespace and common list markers / numbering
+        k = k.strip()
+        k = re.sub(r'^\s*[-*•]+\s*', '', k)          # "- cat", "* dog"
+        k = re.sub(r'^\s*\d+[.)]\s*', '', k)         # "1. cat", "2) dog"
+        k = k.strip().strip('"\'')
+
+        # Remove trailing sentence punctuation
+        k = k.rstrip('.,;:!?').strip()
+
+        # Normalize internal whitespace
+        k = re.sub(r'\s+', ' ', k)
+
+        if not k:
+            continue
+
+        low = k.lower()
+
+        # Reject trivial filler words
+        if low in {'and', 'the', 'a', 'an'}:
+            continue
+
+        # Reject obvious prose / refusal-ish fragments
+        if len(k) > 40:
+            continue
+        if any(ch in k for ch in '\n\r\t'):
+            continue
+        if len(k.split()) > 4:
+            continue
+        if re.search(r'[.!?]', k):
+            continue
+
+        # Optional character allowlist; keeps it conservative
+        if not re.fullmatch(r"[A-Za-z0-9À-ÖØ-öø-ÿ _'&/+()-]+", k):
+            continue
+
+        if low not in seen:
+            seen.add(low)
+            clean.append(k)
+
+        if len(clean) >= max_keywords:
+            break
+
+    return clean
+
+
+def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response,
                           original_exif_bytes=None, verbose=False, marker=None, use_xpcomment=False):
     """Write keywords into EXIF/IPTC metadata using piexif."""
     try:

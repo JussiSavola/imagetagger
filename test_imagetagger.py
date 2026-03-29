@@ -16,6 +16,7 @@ from imagetagger import (
     parse_keywords,
     parse_ratelimit_reset,
     strip_thinking,
+    sanitize_keywords,
     resize_for_api,
     extract_metadata,
     check_already_processed,
@@ -62,6 +63,34 @@ def test_parse_keywords_limit():
     response = ", ".join([f"word{i}" for i in range(30)])
     keywords = parse_keywords(response)
     assert len(keywords) == 20
+
+# --- Keyword sanitization ---
+
+@pytest.mark.parametrize("raw, expected", [
+    # List markers stripped
+    (["- cat", "* dog", "• bird"], ["cat", "dog", "bird"]),
+    # Numbering stripped
+    (["1. cat", "2) dog"], ["cat", "dog"]),
+    # Trailing punctuation stripped
+    (["cat.", "dog,", "bird;"], ["cat", "dog", "bird"]),
+    # Duplicates (case-insensitive) removed
+    (["Cat", "cat", "CAT"], ["Cat"]),
+    # Filler words rejected
+    (["and", "the", "a", "cat"], ["cat"]),
+    # Too long (>40 chars) rejected
+    (["x" * 41, "cat"], ["cat"]),
+    # Too many words (>4) rejected
+    (["one two three four five", "cat"], ["cat"]),
+    # Prose punctuation (internal) rejected
+    (["nice photo. great shot", "cat"], ["cat"]),
+    # Quotes stripped
+    (['"cat"', "'dog'"], ["cat", "dog"]),
+    # max_keywords respected
+    ([f"word{i}" for i in range(30)], [f"word{i}" for i in range(20)]),
+])
+def test_sanitize_keywords(raw, expected):
+    assert sanitize_keywords(raw) == expected
+
 
 # --- Thinking stripping ---
 

@@ -15,6 +15,11 @@ from PIL.ExifTags import TAGS, GPSTAGS
 import requests
 import json
 
+# Ensure UTF-8 output on Windows where the default terminal encoding (cp1252)
+# cannot represent emoji characters used in status messages.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 # Configuration
 MAX_DIMENSIONS = (800, 600)
 SUPPORTED_FORMATS = ('.jpg', '.jpeg', '.png')

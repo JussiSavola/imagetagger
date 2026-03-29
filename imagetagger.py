@@ -312,7 +312,7 @@ Rules:
                 keywords = parse_keywords(content)
                 return content, keywords, balance_usd
 
-            elif response.status_code == 429:
+            elif response.status_code == 429 or response.status_code == 503:
                 _throttle_delay *= 1.1
                 # Prefer the reset time the API tells us to wait
                 delay = None

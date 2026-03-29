@@ -181,8 +181,9 @@ Using Venice.ai (as of 2026-03-29):
 |-------|---------------|--------------|
 | `google-gemma-3-27b-it` | $0.000050 (~0.005 ¢) | ~$0.05 |
 | `qwen3-5-9b` | $0.000028 (~0.003 ¢) | ~$0.03 |
+| `claude-sonnet-4-6` | $0.015 per image (~1.5 ¢) | ~$15 |
 
-Processing a large batch is very cheap — 10 000 images costs roughly $0.30–$0.50 depending on the model.
+Processing a large batch is very cheap — 10 000 images costs roughly $0.30–$0.50 using low end models.
 
 ## API Best Practices
 

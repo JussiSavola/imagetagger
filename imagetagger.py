@@ -512,7 +512,12 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             # CRITICAL: Check for API errors OR Content Refusals before touching files
             is_error = ai_response.startswith("ERROR") or ai_response.startswith("EXCEPTION")
             is_refusal = not keywords or "sorry" in ai_response.lower() or "can't" in ai_response.lower() or "cannot" in ai_response.lower()
-            
+
+            if "ERROR_401" in ai_response:
+                print(f"  ❌ FATAL: {ai_response}")
+                print(f"  🛑 ABORTING - Invalid API key, no point continuing")
+                return
+
             if is_error or is_refusal:
                 print(f"  ❌ FAILED: {ai_response}")
                 print(f"  ⏭️  SKIPPING - Metadata left untouched due to error/refusal")

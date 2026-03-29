@@ -424,6 +424,23 @@ def test_force_logic(MockConfig, mock_call_keywords, temp_dir, dummy_image, env_
     # Verify API WAS called again
     assert mock_call_keywords.called
 
+@patch('imagetagger.call_venice_for_keywords')
+@patch('imagetagger.VeniceConfig')
+def test_abort_on_invalid_api_key(MockConfig, mock_call, temp_dir, dummy_image, env_file):
+    """Process should abort immediately on 401 Invalid API key, not just skip the image"""
+    cfg = MagicMock()
+    cfg.model = "test"
+    cfg.is_vision = True
+    MockConfig.return_value = cfg
+
+    mock_call.return_value = ("ERROR_401: Invalid API key", [])
+
+    process_images(str(temp_dir), force=True, env_file=env_file)
+
+    # API called only once — aborted, did not continue to next image
+    assert mock_call.call_count == 1
+
+
 @patch('imagetagger.save_with_new_metadata')
 @patch('imagetagger.call_venice_for_keywords')
 @patch('imagetagger.VeniceConfig')

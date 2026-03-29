@@ -173,6 +173,17 @@ On subsequent runs, images containing this marker in the corresponding field are
 
 \* Marker only written to XPComment if `-x` flag is used. Without `-x`, marker is appended to XPKeywords.
 
+## Cost Examples
+
+Using Venice.ai (as of 2026-03-29):
+
+| Model | Cost per image | ~1000 images |
+|-------|---------------|--------------|
+| `google-gemma-3-27b-it` | $0.000050 (~0.005 ¢) | ~$0.05 |
+| `qwen3-5-9b` | $0.000028 (~0.003 ¢) | ~$0.03 |
+
+Processing a large batch is very cheap — 10 000 images costs roughly $0.30–$0.50 depending on the model.
+
 ## API Best Practices
 
 This tool implements Venice.ai recommended practices:

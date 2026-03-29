@@ -1,3 +1,5 @@
+# ImageTagger — AI-powered image keyword tagger
+# Author: Jussi Savola <jsavola@iki.fi>
 
 import os
 import re
@@ -541,9 +543,6 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
             if len(keywords) > 5:
                 print(f"     ({len(keywords)} total)")
-
-            # 4. Save
-            print(f"\n💾 SAVING")
 
             # 4. Save
             print(f"\n💾 SAVING")

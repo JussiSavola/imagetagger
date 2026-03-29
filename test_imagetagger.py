@@ -12,9 +12,10 @@ import importlib.util
 # Import the module to test
 import imagetagger
 from imagetagger import (
-    VeniceConfig, 
-    parse_keywords, 
-    resize_for_api, 
+    VeniceConfig,
+    parse_keywords,
+    parse_ratelimit_reset,
+    resize_for_api,
     extract_metadata,
     check_already_processed,
     save_with_new_metadata,
@@ -60,6 +61,76 @@ def test_parse_keywords_limit():
     response = ", ".join([f"word{i}" for i in range(30)])
     keywords = parse_keywords(response)
     assert len(keywords) == 20
+
+# --- Rate-limit reset header parsing ---
+
+@pytest.mark.parametrize("value, expected", [
+    ("1m4.637s", 64.637),
+    ("3m26.938s", 206.938),
+    ("30s", 30.0),
+    ("500ms", 0.5),
+    ("1ms", 0.001),
+    ("2m0s", 120.0),
+    (None, None),
+    ("", None),
+])
+def test_parse_ratelimit_reset(value, expected):
+    result = parse_ratelimit_reset(value)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected, rel=1e-4)
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_429_uses_header_reset_time(mock_post, mock_sleep, dummy_image, mock_config):
+    """On 429 with tokens exhausted, wait time comes from x-ratelimit-reset-tokens header"""
+    mock_resp_429 = MagicMock()
+    mock_resp_429.status_code = 429
+    mock_resp_429.headers = {
+        'x-ratelimit-remaining-tokens': '0',
+        'x-ratelimit-reset-tokens': '1m4.637s',
+        'x-ratelimit-remaining-requests': '9975',
+        'x-ratelimit-reset-requests': '3m26.938s',
+    }
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.status_code = 200
+    mock_resp_200.headers = {}
+    mock_resp_200.json.return_value = {'choices': [{'message': {'content': 'ok'}}]}
+
+    mock_post.side_effect = [mock_resp_429, mock_resp_200]
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    # The retry sleep should be ~64.637s (from the header), not the default 1s backoff
+    retry_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
+    assert any(abs(s - 64.637) < 0.01 for s in retry_sleeps)
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_429_fallback_to_backoff_without_headers(mock_post, mock_sleep, dummy_image, mock_config):
+    """On 429 without usable headers, falls back to exponential backoff capped at 16s"""
+    mock_resp_429 = MagicMock()
+    mock_resp_429.status_code = 429
+    mock_resp_429.headers = {}  # no rate limit headers
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.status_code = 200
+    mock_resp_200.headers = {}
+    mock_resp_200.json.return_value = {'choices': [{'message': {'content': 'ok'}}]}
+
+    mock_post.side_effect = [mock_resp_429, mock_resp_200]
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    retry_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
+    assert retry_sleeps[0] == 1  # first attempt: 1s backoff
+
 
 # --- Piexif Decoding Tests ---
 

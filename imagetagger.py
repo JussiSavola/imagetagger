@@ -1,5 +1,6 @@
 
 import os
+import re
 import base64
 import io
 import time
@@ -204,6 +205,26 @@ def extract_metadata(image_path, verbose=False):
         meta['display_lines'].append(f"  [Error: {e}]")
     return meta
 
+def parse_ratelimit_reset(value):
+    """Parse an API reset duration string like '1m4.637s', '30s', '500ms' into seconds."""
+    if not value:
+        return None
+    value = value.strip()
+    # Pure milliseconds (e.g. '500ms', '1ms') — must check before minutes
+    m = re.fullmatch(r'(\d+)ms', value)
+    if m:
+        return int(m.group(1)) / 1000.0
+    total = 0.0
+    m = re.match(r'(\d+)m', value)
+    if m:
+        total += int(m.group(1)) * 60
+        value = value[m.end():]
+    m = re.match(r'([\d.]+)s', value)
+    if m:
+        total += float(m.group(1))
+    return total if total > 0 else None
+
+
 def call_venice_for_keywords(base64_image, metadata_context, config, verbose=False):
     global _throttle_delay
     url = f"{config.base_url}/chat/completions"
@@ -270,8 +291,20 @@ Rules:
 
             elif response.status_code == 429:
                 _throttle_delay *= 1.1
-                delay = min(base_delay * (2 ** attempt), max_delay)
-                print(f"    ⏳ Rate limited. Waiting {delay}s... (Attempt {attempt+1}/{max_retries})")
+                # Prefer the reset time the API tells us to wait
+                delay = None
+                for remaining_key, reset_key in [
+                    ('x-ratelimit-remaining-tokens', 'x-ratelimit-reset-tokens'),
+                    ('x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests'),
+                ]:
+                    remaining = response.headers.get(remaining_key)
+                    if remaining is not None and int(remaining) == 0:
+                        delay = parse_ratelimit_reset(response.headers.get(reset_key))
+                        if delay is not None:
+                            break
+                if delay is None:
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                print(f"    ⏳ Rate limited. Waiting {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
                 continue
 

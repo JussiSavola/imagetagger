@@ -175,8 +175,9 @@ def test_api_call_success(mock_post, dummy_image, mock_config):
     assert keywords == ['sky', 'cloud', 'blue']
     assert raw == 'sky, cloud, blue'
 
+@patch('imagetagger.time.sleep')
 @patch('imagetagger.requests.post')
-def test_api_rate_limit_retry(mock_post, dummy_image, mock_config):
+def test_api_rate_limit_retry(mock_post, mock_sleep, dummy_image, mock_config):
     # Mock Responses: 429 then 200
     mock_resp_429 = MagicMock()
     mock_resp_429.status_code = 429
@@ -195,6 +196,100 @@ def test_api_rate_limit_retry(mock_post, dummy_image, mock_config):
     # Should have retried once
     assert mock_post.call_count == 2
     assert keywords == ['retry success']
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_rate_limit_up_to_10_retries(mock_post, mock_sleep, dummy_image, mock_config):
+    """All 10 attempts return 429 -> ERROR: Max retries exceeded"""
+    mock_resp_429 = MagicMock()
+    mock_resp_429.status_code = 429
+    mock_resp_429.headers = {}
+    mock_post.return_value = mock_resp_429
+
+    b64, _, _ = resize_for_api(dummy_image)
+    raw, keywords = imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    assert mock_post.call_count == 10
+    assert raw == "ERROR: Max retries exceeded"
+    assert keywords == []
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_retry_delay_capped_at_16s(mock_post, mock_sleep, dummy_image, mock_config):
+    """Retry delays double each attempt but must not exceed 16s"""
+    mock_resp_429 = MagicMock()
+    mock_resp_429.status_code = 429
+    mock_resp_429.headers = {}
+    mock_post.return_value = mock_resp_429
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    # sleep is called for throttle + retry delay each attempt
+    retry_sleeps = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
+    assert all(s <= 16 for s in retry_sleeps)
+    assert max(retry_sleeps) == 16
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_throttle_delay_increases_on_429(mock_post, mock_sleep, dummy_image, mock_config):
+    """Adaptive throttle delay grows by 10% on each 429"""
+    imagetagger._throttle_delay = 0.1
+
+    mock_resp_429 = MagicMock()
+    mock_resp_429.status_code = 429
+    mock_resp_429.headers = {}
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.status_code = 200
+    mock_resp_200.headers = {}
+    mock_resp_200.json.return_value = {'choices': [{'message': {'content': 'ok'}}]}
+
+    mock_post.side_effect = [mock_resp_429, mock_resp_429, mock_resp_200]
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    assert imagetagger._throttle_delay == pytest.approx(0.1 * 1.1 * 1.1 * 0.98, rel=1e-6)
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_throttle_delay_decreases_on_success(mock_post, mock_sleep, dummy_image, mock_config):
+    """Adaptive throttle delay shrinks by 2% on success, floored at 0.1"""
+    imagetagger._throttle_delay = 0.5
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.status_code = 200
+    mock_resp_200.headers = {}
+    mock_resp_200.json.return_value = {'choices': [{'message': {'content': 'ok'}}]}
+    mock_post.return_value = mock_resp_200
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    assert imagetagger._throttle_delay == pytest.approx(0.5 * 0.98, rel=1e-6)
+
+
+@patch('imagetagger.time.sleep')
+@patch('imagetagger.requests.post')
+def test_throttle_delay_floored_at_0_1(mock_post, mock_sleep, dummy_image, mock_config):
+    """Throttle delay never drops below 0.1s"""
+    imagetagger._throttle_delay = 0.1
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.status_code = 200
+    mock_resp_200.headers = {}
+    mock_resp_200.json.return_value = {'choices': [{'message': {'content': 'ok'}}]}
+    mock_post.return_value = mock_resp_200
+
+    b64, _, _ = resize_for_api(dummy_image)
+    imagetagger.call_venice_for_keywords(b64, "", mock_config)
+
+    assert imagetagger._throttle_delay == pytest.approx(0.1, rel=1e-6)
 
 # --- Workflow Tests ---
 

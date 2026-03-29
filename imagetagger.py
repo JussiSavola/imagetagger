@@ -20,6 +20,10 @@ DEFAULT_ENV_FILE = "env.txt"
 
 # Venice.ai specific constants
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
+
+# Adaptive inter-request throttle delay (seconds). Increases 10% on rate limit,
+# decreases 2% on success, floored at 0.1s.
+_throttle_delay = 0.1
 VISION_KEYWORDS = ['vision', 'vl', 'llava', 'gemma', 'qwen2.5-vl', 'dolphin-vision', 'llava-1.6', 'qwen-vl', 'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo']
 
 class VeniceConfig:
@@ -201,6 +205,7 @@ def extract_metadata(image_path, verbose=False):
     return meta
 
 def call_venice_for_keywords(base64_image, metadata_context, config, verbose=False):
+    global _throttle_delay
     url = f"{config.base_url}/chat/completions"
     b64_clean = base64_image.strip().replace('\n', '').replace('\r', '')
     
@@ -229,43 +234,47 @@ Rules:
         print(f"\n  [VERBOSE] API Request Payload:")
         print(f"    Model: {config.model}")
     
-    max_retries = 3
+    max_retries = 10
     base_delay = 1
-    
+    max_delay = 16
+
     for attempt in range(max_retries):
         try:
+            time.sleep(_throttle_delay)
             response = requests.post(url, headers=config.get_headers(), json=payload, timeout=60)
-            
+
             if verbose:
                 print(f"\n  [VERBOSE] API Response Headers:")
                 for key, value in response.headers.items():
                     if key.lower().startswith('x-') or key.lower() == 'cf-ray':
                         print(f"    {key}: {value}")
-            
+
             balance_usd = response.headers.get('x-venice-balance-usd')
             if balance_usd:
                 print(f"    💰 Balance: ${float(balance_usd):.4f}")
-            
+
             deprecation = response.headers.get('x-venice-model-deprecation-warning')
             if deprecation:
                 print(f"    ⚠️  DEPRECATION: {deprecation}")
-            
+
             if response.status_code == 200:
+                _throttle_delay = max(0.1, _throttle_delay * 0.98)
                 result = response.json()
                 content = result['choices'][0]['message']['content']
-                
+
                 if verbose:
                     print(f"\n  [VERBOSE] Raw AI Response:\n  {content}")
-                    
+
                 keywords = parse_keywords(content)
                 return content, keywords
-            
+
             elif response.status_code == 429:
-                delay = base_delay * (2 ** attempt)
+                _throttle_delay *= 1.1
+                delay = min(base_delay * (2 ** attempt), max_delay)
                 print(f"    ⏳ Rate limited. Waiting {delay}s... (Attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
                 continue
-            
+
             elif response.status_code == 401:
                 return "ERROR_401: Invalid API key", []
             elif response.status_code == 404:
@@ -277,17 +286,17 @@ Rules:
             else:
                 cf_ray = response.headers.get('CF-RAY', 'N/A')
                 return f"ERROR_{response.status_code}: CF-RAY={cf_ray}", []
-                
+
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
+                delay = min(base_delay * (2 ** attempt), max_delay)
                 print(f"    ⏳ Timeout. Retrying in {delay}s...")
                 time.sleep(delay)
                 continue
             return "ERROR: Request timeout after retries", []
         except Exception as e:
             return f"EXCEPTION: {str(e)}", []
-    
+
     return "ERROR: Max retries exceeded", []
 
 def parse_keywords(ai_response):

@@ -40,6 +40,8 @@ import requests
 from PIL import Image
 from PIL.ExifTags import TAGS
 
+print("RUNNING FIXED SCRIPT")
+
 # Ensure UTF-8 output on Windows where the default terminal encoding (cp1252)
 # cannot represent emoji characters used in status messages.
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -79,12 +81,56 @@ def file_mtime_utc(path: Path) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def make_atomic_temp_path(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    ts = int(time.time() * 1000)
+    return path.with_name(f"{path.name}.tmp.{pid}.{ts}")
+
+
+def _replace_with_retries(src: Path, dst: Path, retries: int = 8, delay: float = 0.25) -> None:
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            os.replace(str(src), str(dst))
+            return
+        except PermissionError as e:
+            last_exc = e
+            if attempt < retries - 1:
+                time.sleep(delay * (attempt + 1))
+                continue
+            raise
+        except OSError as e:
+            last_exc = e
+            # Fallback for some SMB/Windows cases: remove then replace.
+            if dst.exists():
+                try:
+                    dst.unlink()
+                    os.replace(str(src), str(dst))
+                    return
+                except Exception:
+                    pass
+            if attempt < retries - 1:
+                time.sleep(delay * (attempt + 1))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+
+
 def write_json_atomic(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-    tmp.replace(path)
+    tmp = make_atomic_temp_path(path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+        _replace_with_retries(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def read_json(path: Path) -> dict:
@@ -1260,7 +1306,6 @@ def apply_completed_item(root_dir: Path, meta: BatchMeta, item: ManifestItem, *,
         "source": item.source_relpath,
     })
 
-    temp_target = None
     try:
         orig_exif = None
         with Image.open(src) as tmp:
@@ -1271,14 +1316,13 @@ def apply_completed_item(root_dir: Path, meta: BatchMeta, item: ManifestItem, *,
         if meta.settings and meta.settings.model not in keywords_with_model:
             keywords_with_model.append(meta.settings.model)
 
-        # Always write image output atomically via a unique temporary file in the
-        # destination directory, then replace the final target. This hardens both
-        # overwrite mode and enriched-copy mode against partial writes.
+        target_to_write = dst
         temp_target = make_atomic_temp_path(dst)
+        target_to_write = temp_target
 
         ok = save_with_new_metadata(
             src,
-            temp_target,
+            target_to_write,
             keywords_with_model,
             item.result.raw_response_text or "",
             original_exif_bytes=orig_exif,
@@ -1289,22 +1333,32 @@ def apply_completed_item(root_dir: Path, meta: BatchMeta, item: ManifestItem, *,
         if not ok:
             raise RuntimeError("save_with_new_metadata() returned False")
 
-        os.replace(temp_target, dst)
+        _replace_with_retries(temp_target, dst)
 
-        log_content = f"Source: {src.name}\n"
-        if meta.settings:
-            log_content += f"Model: {meta.settings.model}\n"
-        log_content += (
-            f"Marker: {meta.settings.marker if meta.settings else DEFAULT_TAG} "
-            f"({'XPComment' if meta.settings and meta.settings.use_xpcomment else 'XPKeywords'})\n"
-        )
-        log_content += "=" * 50 + "\n"
-        log_content += "KEYWORDS:\n"
-        log_content += ", ".join(item.result.keywords) if item.result.keywords else "No keywords extracted"
-        log_content += "\n" + "=" * 50 + "\n"
-        log_content += "RAW AI RESPONSE:\n"
-        log_content += item.result.raw_response_text or ""
-        atomic_write_text(log_path, log_content)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_log = make_atomic_temp_path(log_path)
+        try:
+            with open(temp_log, "w", encoding="utf-8") as f:
+                f.write(f"Source: {src.name}\n")
+                if meta.settings:
+                    f.write(f"Model: {meta.settings.model}\n")
+                f.write(
+                    f"Marker: {meta.settings.marker if meta.settings else DEFAULT_TAG} "
+                    f"({'XPComment' if meta.settings and meta.settings.use_xpcomment else 'XPKeywords'})\n"
+                )
+                f.write("=" * 50 + "\n")
+                f.write("KEYWORDS:\n")
+                f.write(", ".join(item.result.keywords) if item.result.keywords else "No keywords extracted")
+                f.write("\n" + "=" * 50 + "\n")
+                f.write("RAW AI RESPONSE:\n")
+                f.write(item.result.raw_response_text or "")
+            _replace_with_retries(temp_log, log_path)
+        finally:
+            try:
+                if temp_log.exists():
+                    temp_log.unlink()
+            except Exception:
+                pass
 
         item.local_integrity.output_written = True
         item.local_integrity.log_written = True
@@ -1322,11 +1376,16 @@ def apply_completed_item(root_dir: Path, meta: BatchMeta, item: ManifestItem, *,
         })
         return True
     except Exception as e:
-        if temp_target is not None and temp_target.exists():
-            try:
-                temp_target.unlink()
-            except OSError:
-                pass
+        try:
+            if 'temp_target' in locals() and temp_target and Path(temp_target).exists():
+                Path(temp_target).unlink()
+        except Exception:
+            pass
+        try:
+            if 'temp_log' in locals() and temp_log and Path(temp_log).exists():
+                Path(temp_log).unlink()
+        except Exception:
+            pass
         item.processing.status = ItemStatus.FAILED_APPLY.value
         item.processing.status_reason = f"Apply failed: {e}"
         item.processing.failed_at = utc_now_iso()

@@ -625,7 +625,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
 
             # CRITICAL: Check for API errors OR Content Refusals before touching files
             is_error = ai_response.startswith("ERROR") or ai_response.startswith("EXCEPTION")
-            is_refusal = not keywords or "sorry" in ai_response.lower() or "can't" in ai_response.lower() or "cannot" in ai_response.lower()
+            is_refusal = not keywords  # sanitize_keywords already strips prose; empty list = real refusal
 
             if "ERROR_401" in ai_response:
                 print(f"  ❌ FATAL: {ai_response}")

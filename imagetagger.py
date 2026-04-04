@@ -279,7 +279,8 @@ Rules:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ],
-        "max_tokens": 200,
+        "max_tokens": 700,
+        "num_predict": 700,  # Ollama alias for max_tokens (ignored by other providers)
         "temperature": temperature,
         "think": False   # Ollama: suppress chain-of-thought for thinking models (ignored by other providers)
     }
@@ -302,7 +303,7 @@ Rules:
     for attempt in range(max_retries):
         try:
             time.sleep(_throttle_delay)
-            response = requests.post(url, headers=config.get_headers(), json=payload, timeout=60)
+            response = requests.post(url, headers=config.get_headers(), json=payload, timeout=180)
 
             if verbose:
                 print(f"\n  [VERBOSE] API Response Headers:")

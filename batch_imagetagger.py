@@ -196,7 +196,7 @@ class APIConfig:
         self.organization = self.config.get("organization")
         self.project = self.config.get("project")
         self.prompt_cache_key = self.config.get("prompt_cache_key")
-        self.request_timeout = float(self.config.get("request_timeout", "120"))
+        self.request_timeout = float(self.config.get("request_timeout", "180"))
 
     def apply_overrides(self, model_override: Optional[str] = None) -> None:
         if model_override:
@@ -987,7 +987,8 @@ def build_openai_chat_body(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        "max_tokens": 200,
+        "max_tokens": 700,
+        "num_predict": 700,  # Ollama alias for max_tokens (ignored by other providers)
         "temperature": temperature,
         "think": False,  # Ollama: suppress chain-of-thought for thinking models (ignored by other providers)
     }

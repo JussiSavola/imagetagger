@@ -306,7 +306,12 @@ Rules:
             if response.status_code == 200:
                 _throttle_delay = max(0.1, _throttle_delay * 0.98)
                 result = response.json()
-                content = result['choices'][0]['message']['content']
+                msg = result['choices'][0]['message']
+                content = msg.get('content') or ''
+                # Some thinking models (e.g. Ollama gemma4:e2b) return empty
+                # content with the actual response in the 'reasoning' field.
+                if not content.strip():
+                    content = msg.get('reasoning') or ''
                 content = strip_thinking(content)
 
                 if verbose:

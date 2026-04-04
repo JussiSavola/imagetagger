@@ -1274,7 +1274,11 @@ def ingest_output_jsonl(root_dir: Path, meta: BatchMeta, manifest: Manifest) -> 
             item.processing.error_reason = json.dumps(body, ensure_ascii=False)[:1000]
             continue
         try:
-            content = body["choices"][0]["message"]["content"]
+            msg = body["choices"][0]["message"]
+            content = msg.get("content") or ""
+            # Some thinking models return empty content with response in 'reasoning'
+            if not content.strip():
+                content = msg.get("reasoning") or ""
         except Exception as e:
             item.processing.status = ItemStatus.FAILED_PARSE.value
             item.processing.status_reason = f"Malformed response body: {e}"

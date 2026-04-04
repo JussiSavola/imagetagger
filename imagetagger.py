@@ -238,7 +238,7 @@ def parse_ratelimit_reset(value):
     return total if total > 0 else None
 
 
-def call_AI_vision_for_keywords(base64_image, metadata_context, config, verbose=False):
+def call_AI_vision_for_keywords(base64_image, metadata_context, config, verbose=False, temperature=0.2):
     global _throttle_delay
     url = f"{config.base_url}/chat/completions"
     b64_clean = base64_image.strip().replace('\n', '').replace('\r', '')
@@ -261,7 +261,7 @@ Rules:
             {"role": "user", "content": user_content}
         ],
         "max_tokens": 200,
-        "temperature": 0.2
+        "temperature": temperature
     }
 
     if config.is_venice:
@@ -433,17 +433,28 @@ def sanitize_keywords(raw_keywords, max_keywords=20):
 
 
 def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response,
-                          original_exif_bytes=None, verbose=False, marker=None, use_xpcomment=False):
+                          original_exif_bytes=None, verbose=False, marker=None, use_xpcomment=False,
+                          drop_gps=False, drop_datetime=False):
     """Write keywords into EXIF/IPTC metadata using piexif."""
     try:
         import piexif
         from piexif import ImageIFD, ExifIFD
-        
+
         with Image.open(original_path) as img:
             if original_exif_bytes:
                 exif_dict = piexif.load(original_exif_bytes)
             else:
                 exif_dict = {"0th": {}, "1st": {}, "Exif": {}, "GPS": {}, "thumbnail": None}
+
+            if drop_gps:
+                exif_dict["GPS"] = {}
+
+            if drop_datetime:
+                for tag in [ImageIFD.DateTime]:
+                    exif_dict["0th"].pop(tag, None)
+                for tag in [ExifIFD.DateTimeOriginal, ExifIFD.DateTimeDigitized,
+                            ExifIFD.SubsecTimeOriginal, ExifIFD.SubsecTimeDigitized]:
+                    exif_dict["Exif"].pop(tag, None)
             
             # Write AI keywords to XPKeywords (always)
             keywords_str = ", ".join(keywords) if keywords else "AI analyzed"
@@ -481,6 +492,10 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
                     print(f"    XPComment: {comment_text}")
                 print(f"    ImageDescription: {description[:50]}...")
                 print(f"    Processing marker '{marker}' in: {marker_location}")
+                if drop_gps:
+                    print(f"    GPS data: stripped")
+                if drop_datetime:
+                    print(f"    Datetime fields: stripped")
             
             exif_bytes = piexif.dump(exif_dict)
             
@@ -504,8 +519,9 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
         print(f"      ⚠️  Metadata write failed: {e}")
         return False
 
-def process_images(input_dir, overwrite=False, verbose=False, force=False, 
-                   env_file=None, marker=None, use_xpcomment=False):
+def process_images(input_dir, overwrite=False, verbose=False, force=False,
+                   env_file=None, marker=None, use_xpcomment=False,
+                   temperature=0.2, drop_gps=False, drop_datetime=False):
     input_path = Path(input_dir).resolve()
     
     if not input_path.is_dir():
@@ -530,6 +546,14 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
         print(f"Mode:   {mode_desc}")
         print(f"Marker: '{marker}'")
         print(f"Marker field: {'XPComment' if use_xpcomment else 'XPKeywords (in keyword list)'}")
+        print(f"Temperature: {temperature}")
+        privacy_flags = []
+        if drop_gps:
+            privacy_flags.append("GPS stripped")
+        if drop_datetime:
+            privacy_flags.append("datetime stripped")
+        if privacy_flags:
+            print(f"Privacy: {', '.join(privacy_flags)}")
         if force:
             print(f"Force:  Yes (reprocessing all)")
         print(f"{'='*70}\n")
@@ -597,7 +621,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
 # 3. Get Keywords
             print(f"\n🤖 EXTRACTING KEYWORDS")
             meta_text = ", ".join(meta['ai_context'])
-            ai_response, keywords, balance = call_AI_vision_for_keywords(b64, meta_text, config, verbose=verbose)
+            ai_response, keywords, balance = call_AI_vision_for_keywords(b64, meta_text, config, verbose=verbose, temperature=temperature)
 
             # CRITICAL: Check for API errors OR Content Refusals before touching files
             is_error = ai_response.startswith("ERROR") or ai_response.startswith("EXCEPTION")
@@ -654,7 +678,8 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             keywords_with_model = list(keywords) + [config.model]
             success = save_with_new_metadata(
                 img_file, target_to_write, keywords_with_model, ai_response,
-                orig_exif, verbose=verbose, marker=marker, use_xpcomment=use_xpcomment
+                orig_exif, verbose=verbose, marker=marker, use_xpcomment=use_xpcomment,
+                drop_gps=drop_gps, drop_datetime=drop_datetime
             )
             
             if success:
@@ -803,7 +828,23 @@ Examples:
         action='store_true',
         help='Store marker ONLY in XPComment field (not in keywords list)'
     )
-    
+    parser.add_argument(
+        '-T', '--temperature',
+        type=float,
+        default=0.2,
+        help='AI sampling temperature 0.0–1.0 (default: 0.2; lower = more consistent)'
+    )
+    parser.add_argument(
+        '--dropgps',
+        action='store_true',
+        help='Strip GPS coordinates from output images'
+    )
+    parser.add_argument(
+        '--dropdatetime',
+        action='store_true',
+        help='Strip datetime fields from output images'
+    )
+
     args = parser.parse_args()
 
     process_images(
@@ -813,7 +854,10 @@ Examples:
         force=args.force,
         env_file=args.env,
         marker=args.tag,
-        use_xpcomment=args.xpcomment
+        use_xpcomment=args.xpcomment,
+        temperature=args.temperature,
+        drop_gps=args.dropgps,
+        drop_datetime=args.dropdatetime,
     )
 
 if __name__ == "__main__":

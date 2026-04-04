@@ -644,6 +644,11 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 print(f"  🛑 ABORTING - Invalid API key, no point continuing")
                 return
 
+            if "ERROR_404" in ai_response:
+                print(f"  ❌ FATAL: {ai_response}")
+                print(f"  🛑 ABORTING - Model not found, no point continuing")
+                return
+
             if is_error or is_refusal:
                 reason = ai_response[:120] if is_error else "Model refusal (no keywords extracted)"
                 print(f"  ❌ FAILED: {ai_response}")

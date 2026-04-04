@@ -66,6 +66,9 @@ class APIConfig:
         self.base_url = self.config.get('api_base', VENICE_BASE_URL).rstrip('/')
         self.model = self.config.get('model', 'google-gemma-3-27b-it')
 
+    def apply_overrides(self, model_override=None):
+        if model_override:
+            self.model = model_override
         self.is_vision = any(v in self.model.lower() for v in VISION_KEYWORDS)
         self.is_venice = 'venice.ai' in self.base_url
 
@@ -521,7 +524,8 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
 
 def process_images(input_dir, overwrite=False, verbose=False, force=False,
                    env_file=None, marker=None, use_xpcomment=False,
-                   temperature=0.2, drop_gps=False, drop_datetime=False):
+                   temperature=0.2, drop_gps=False, drop_datetime=False,
+                   model_override=None):
     input_path = Path(input_dir).resolve()
     
     if not input_path.is_dir():
@@ -539,6 +543,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
     
     try:
         config = APIConfig(env_file_path=env_file)
+        config.apply_overrides(model_override=model_override)
         print(f"Model:  {config.model}")
         print(f"Vision: {'Yes' if config.is_vision else 'No (text-only)'}")
         print(f"Input:  {input_path}")
@@ -867,6 +872,12 @@ Examples:
         help='Store marker ONLY in XPComment field (not in keywords list)'
     )
     parser.add_argument(
+        '-m', '--model',
+        type=str,
+        default=None,
+        help='Override the model from env.txt (e.g. gpt-4o-mini, qwen3-5-9b)'
+    )
+    parser.add_argument(
         '-T', '--temperature',
         type=float,
         default=0.2,
@@ -896,6 +907,7 @@ Examples:
         temperature=args.temperature,
         drop_gps=args.dropgps,
         drop_datetime=args.dropdatetime,
+        model_override=args.model,
     )
 
 if __name__ == "__main__":

@@ -453,7 +453,7 @@ def save_with_new_metadata(original_path, output_path, keywords, ai_raw_response
                 for tag in [ImageIFD.DateTime]:
                     exif_dict["0th"].pop(tag, None)
                 for tag in [ExifIFD.DateTimeOriginal, ExifIFD.DateTimeDigitized,
-                            ExifIFD.SubsecTimeOriginal, ExifIFD.SubsecTimeDigitized]:
+                            37521, 37522]:  # SubsecTimeOriginal, SubsecTimeDigitized (no named constant in piexif)
                     exif_dict["Exif"].pop(tag, None)
             
             # Write AI keywords to XPKeywords (always)

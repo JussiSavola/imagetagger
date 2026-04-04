@@ -549,7 +549,10 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
     skipped = 0
     processed = 0
     errors = 0
-    
+    times_preprocess = []
+    times_ai = []
+    times_metadata = []
+
     for idx, img_file in enumerate(images, 1):
         print(f"\n{'─'*70}")
         print(f"[{idx}/{len(images)}] {img_file.name}")
@@ -576,17 +579,21 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
         temp_file = None
         
         try:
+            t0 = time.time()
+
             # 1. Metadata
             print("\n📋 EXISTING METADATA")
             meta = extract_metadata(img_file, verbose=verbose)
             for line in meta['display_lines']:
                 print(f"  {line}")
-            
+
             # 2. Resize
             print(f"\n🖼️  RESIZING")
             b64, orig_sz, new_sz = resize_for_api(img_file)
             print(f"  {orig_sz[0]}x{orig_sz[1]} → {new_sz[0]}x{new_sz[1]}")
-            
+
+            t1 = time.time()
+
 # 3. Get Keywords
             print(f"\n🤖 EXTRACTING KEYWORDS")
             meta_text = ", ".join(meta['ai_context'])
@@ -622,6 +629,8 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             print(f"  ✅ Keywords: {', '.join(keywords[:5])}...")
             if len(keywords) > 5:
                 print(f"     ({len(keywords)} total)")
+
+            t2 = time.time()
 
             # 4. Save
             print(f"\n💾 SAVING")
@@ -687,7 +696,23 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 log_display_path = analysis_file
             
             print(f"  📝 Log: {log_display_path}")
-            
+
+            t3 = time.time()
+            dt_pre = t1 - t0
+            dt_ai  = t2 - t1
+            dt_meta = t3 - t2
+            dt_total = t3 - t0
+            print(f"\n⏱️  TIMING")
+            print(f"  Preprocessing:     {dt_pre:.2f}s")
+            print(f"  AI processing:     {dt_ai:.2f}s")
+            print(f"  Metadata addition: {dt_meta:.2f}s")
+            print(f"  Total:             {dt_total:.2f}s")
+
+            if success:
+                times_preprocess.append(dt_pre)
+                times_ai.append(dt_ai)
+                times_metadata.append(dt_meta)
+
         except Exception as e:
             print(f"\n  ❌ ERROR: {e}")
             errors += 1
@@ -704,6 +729,24 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
     print(f"  Skipped:   {skipped}")
     print(f"  Errors:    {errors}")
     print(f"  Total:     {len(images)}")
+
+    if times_preprocess:
+        sum_pre   = sum(times_preprocess)
+        sum_ai    = sum(times_ai)
+        sum_meta  = sum(times_metadata)
+        sum_total = sum_pre + sum_ai + sum_meta
+        n = len(times_preprocess)
+        print(f"\n  Timing — totals ({n} image{'s' if n != 1 else ''} processed):")
+        print(f"    Preprocessing:     {sum_pre:.2f}s")
+        print(f"    AI processing:     {sum_ai:.2f}s")
+        print(f"    Metadata addition: {sum_meta:.2f}s")
+        print(f"    Total:             {sum_total:.2f}s")
+        print(f"\n  Timing — averages per image:")
+        print(f"    Preprocessing:     {sum_pre/n:.2f}s")
+        print(f"    AI processing:     {sum_ai/n:.2f}s")
+        print(f"    Metadata addition: {sum_meta/n:.2f}s")
+        print(f"    Total:             {sum_total/n:.2f}s")
+
     print(f"{'='*70}")
 
 

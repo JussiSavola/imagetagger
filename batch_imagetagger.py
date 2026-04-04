@@ -332,6 +332,19 @@ def extract_metadata(image_path: Path, verbose: bool = False) -> dict:
     return meta
 
 
+def extract_from_reasoning(reasoning: str) -> str:
+    """
+    Extract the keywords answer from a raw 'reasoning' field (Ollama thinking models).
+    Looks for the last 'Keywords:' / 'Tags:' marker; falls back to the last paragraph.
+    """
+    for marker in ('Keywords:', 'Tags:', 'keywords:', 'tags:'):
+        idx = reasoning.rfind(marker)
+        if idx != -1:
+            return reasoning[idx:]
+    paragraphs = [p.strip() for p in reasoning.split('\n\n') if p.strip()]
+    return paragraphs[-1] if paragraphs else reasoning
+
+
 def parse_keywords(ai_response: str) -> List[str]:
     cleaned = ai_response.replace("Keywords:", "").replace("Tags:", "")
     cleaned = cleaned.replace("Here are the keywords:", "").replace("Here is a list of keywords:", "")
@@ -1278,7 +1291,8 @@ def ingest_output_jsonl(root_dir: Path, meta: BatchMeta, manifest: Manifest) -> 
             content = msg.get("content") or ""
             # Some thinking models return empty content with response in 'reasoning'
             if not content.strip():
-                content = msg.get("reasoning") or ""
+                reasoning = msg.get("reasoning") or ""
+                content = extract_from_reasoning(reasoning) if reasoning else ""
         except Exception as e:
             item.processing.status = ItemStatus.FAILED_PARSE.value
             item.processing.status_reason = f"Malformed response body: {e}"

@@ -221,6 +221,22 @@ def strip_thinking(content):
     return re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
 
 
+def extract_from_reasoning(reasoning):
+    """
+    Extract the keywords answer from a raw 'reasoning' field (Ollama thinking models).
+    The reasoning field is a plain-text chain-of-thought essay.  We look for the
+    last 'Keywords:' / 'Tags:' marker; if absent, fall back to the last paragraph,
+    which is typically where the model lands on its final answer.
+    """
+    for marker in ('Keywords:', 'Tags:', 'keywords:', 'tags:'):
+        idx = reasoning.rfind(marker)
+        if idx != -1:
+            return reasoning[idx:]
+    # No explicit marker — take the last non-empty paragraph
+    paragraphs = [p.strip() for p in reasoning.split('\n\n') if p.strip()]
+    return paragraphs[-1] if paragraphs else reasoning
+
+
 def parse_ratelimit_reset(value):
     """Parse an API reset duration string like '1m4.637s', '30s', '500ms' into seconds."""
     if not value:
@@ -311,7 +327,8 @@ Rules:
                 # Some thinking models (e.g. Ollama gemma4:e2b) return empty
                 # content with the actual response in the 'reasoning' field.
                 if not content.strip():
-                    content = msg.get('reasoning') or ''
+                    reasoning = msg.get('reasoning') or ''
+                    content = extract_from_reasoning(reasoning) if reasoning else ''
                 content = strip_thinking(content)
 
                 if verbose:

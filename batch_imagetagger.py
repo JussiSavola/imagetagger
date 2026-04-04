@@ -792,7 +792,10 @@ def build_manifest(root_dir: Path, settings: BatchSettings, *, verbose: bool = F
         and not p.stem.endswith("_temp")
     ]
 
+    print(f"📂 Scanning {len(images)} image(s) for already-processed markers...")
+
     items: List[ManifestItem] = []
+    skipped_count = 0
     for idx, image_path in enumerate(images, start=1):
         output_path, log_path = build_output_paths(root_dir, image_path, settings.overwrite)
 
@@ -805,6 +808,9 @@ def build_manifest(root_dir: Path, settings: BatchSettings, *, verbose: bool = F
             elif (not settings.overwrite) and output_path.exists() and check_already_processed(output_path, settings.marker, settings.use_xpcomment, verbose=verbose):
                 skipped = True
                 skip_reason = "Enriched copy already processed"
+
+        if skipped:
+            skipped_count += 1
 
         item = ManifestItem(
             custom_id=make_custom_id(idx),
@@ -824,6 +830,8 @@ def build_manifest(root_dir: Path, settings: BatchSettings, *, verbose: bool = F
         )
         items.append(item)
 
+    pending = len(images) - skipped_count
+    print(f"  ✅ {pending} pending, {skipped_count} already processed (skipped)")
     return Manifest(directory=str(root_dir), settings_snapshot=settings, items=items)
 
 
@@ -1054,14 +1062,20 @@ def prepare_next_chunk(root_dir: Path, meta: BatchMeta, manifest: Manifest, conf
     chunk_index = meta.current_chunk_index + 1
 
     pending_items = [item for item in manifest.items if item.processing.status == ItemStatus.PENDING_LOCAL.value]
+    total_pending = len(pending_items)
+    print(f"\n🔧 PREPARING CHUNK {chunk_index}  ({total_pending} pending image(s))")
+    print("─" * 70)
+
     for item in pending_items:
         image_path = Path(item.source_path)
         if not image_path.exists():
             item.processing.status = ItemStatus.INVALIDATED.value
             item.processing.status_reason = "Source image missing before batch preparation"
             item.processing.error_reason = item.processing.status_reason
+            print(f"  [{selected+1}/{total_pending}] ⚠️  Missing: {image_path.name}")
             continue
 
+        print(f"  [{selected+1}/{total_pending}] 🖼️  {image_path.name}", end="", flush=True)
         meta_info = extract_metadata(image_path, verbose=False)
         metadata_context = ", ".join(meta_info.get("ai_context", []))
         b64_image, orig_sz, resized_sz = resize_for_api(image_path)
@@ -1078,12 +1092,17 @@ def prepare_next_chunk(root_dir: Path, meta: BatchMeta, manifest: Manifest, conf
             item.processing.status = ItemStatus.FAILED_PARSE.value
             item.processing.status_reason = "Single request too large for safe batch submission"
             item.processing.error_reason = f"Estimated line size {line_bytes} bytes exceeds hard limit"
+            print(f"  ❌ too large ({line_bytes} bytes)")
             continue
 
         if selected > 0 and total_bytes + line_bytes > meta.settings.max_batch_bytes:
+            print(f"  ⏸  batch cap reached, remaining deferred to next chunk")
             break
         if total_bytes + line_bytes > MAX_BATCH_BYTES_HARD:
+            print(f"  ⏸  hard limit reached")
             break
+
+        print(f"  ({orig_sz[0]}x{orig_sz[1]} → {resized_sz[0]}x{resized_sz[1]}, {line_bytes//1024}KB)")
 
         line_obj = {
             "custom_id": item.custom_id,
@@ -1106,14 +1125,15 @@ def prepare_next_chunk(root_dir: Path, meta: BatchMeta, manifest: Manifest, conf
         total_bytes += line_bytes
         selected += 1
 
+    print("─" * 70)
+    print(f"  Prepared: {selected} image(s)  |  Estimated size: {total_bytes/1_000_000:.2f} MB")
+
     meta.current_chunk_index = chunk_index if selected else meta.current_chunk_index
     meta.current_chunk_bytes = total_bytes
     sync_meta_from_manifest(meta, manifest)
     save_manifest(root_dir, manifest)
     save_meta(root_dir, meta)
 
-    if verbose:
-        print(f"Prepared {selected} image(s) for chunk {meta.current_chunk_index} ({total_bytes} bytes estimated)")
     return selected
 
 
@@ -1122,7 +1142,12 @@ def submit_prepared_chunk(root_dir: Path, meta: BatchMeta, manifest: Manifest, c
     if not requests_path.exists():
         raise FileNotFoundError(f"Missing {requests_path}")
 
+    size_mb = requests_path.stat().st_size / 1_000_000
+    print(f"\n⬆️  Uploading requests.jsonl ({size_mb:.2f} MB)...", end="", flush=True)
     input_file_id = upload_file(config, requests_path)
+    print(f"  ✅ file_id: {input_file_id}")
+
+    print(f"🚀 Creating batch job...", end="", flush=True)
     batch = create_batch(
         config,
         input_file_id,
@@ -1134,6 +1159,8 @@ def submit_prepared_chunk(root_dir: Path, meta: BatchMeta, manifest: Manifest, c
     )
 
     batch_id = batch["id"]
+    print(f"  ✅ Batch created: {batch_id}  (status: {batch.get('status')})")
+    print(f"  ⏳ Processing will complete within 24h. Re-run this script to poll and apply results.")
     meta.active_input_file_id = input_file_id
     meta.active_batch_id = batch_id
     meta.active_output_file_id = batch.get("output_file_id")
@@ -1188,15 +1215,19 @@ def poll_active_batch(root_dir: Path, meta: BatchMeta, config: APIConfig) -> dic
 
 def download_active_outputs(root_dir: Path, meta: BatchMeta, config: APIConfig) -> None:
     if meta.active_output_file_id and not meta.flags.output_downloaded:
+        print(f"⬇️  Downloading output results...", end="", flush=True)
         raw = download_file_content(config, meta.active_output_file_id)
         with open(state_file(root_dir, OUTPUT_JSONL), "wb") as f:
             f.write(raw)
         meta.flags.output_downloaded = True
+        print(f"  ✅ {len(raw)/1_000:.1f} KB")
     if meta.active_error_file_id and not meta.flags.error_output_downloaded:
+        print(f"⬇️  Downloading error file...", end="", flush=True)
         raw = download_file_content(config, meta.active_error_file_id)
         with open(state_file(root_dir, ERROR_OUTPUT_JSONL), "wb") as f:
             f.write(raw)
         meta.flags.error_output_downloaded = True
+        print(f"  ✅ {len(raw)/1_000:.1f} KB")
     save_meta(root_dir, meta)
 
 
@@ -1440,16 +1471,26 @@ def apply_all_ready_items(root_dir: Path, meta: BatchMeta, manifest: Manifest, *
     applied = 0
     failed = 0
     meta.flags.apply_started = True
-    for item in manifest.items:
-        if item.processing.status != ItemStatus.COMPLETED.value:
-            continue
-        if meta.active_batch_id and item.processing.batch_id != meta.active_batch_id:
-            continue
+    ready = [
+        item for item in manifest.items
+        if item.processing.status == ItemStatus.COMPLETED.value
+        and (not meta.active_batch_id or item.processing.batch_id == meta.active_batch_id)
+    ]
+    if ready:
+        print(f"\n💾 APPLYING {len(ready)} result(s) to images")
+        print("─" * 70)
+    for idx, item in enumerate(ready, 1):
+        print(f"  [{idx}/{len(ready)}] {Path(item.source_relpath).name}", end="", flush=True)
         ok = apply_completed_item(root_dir, meta, item, verbose=verbose)
         if ok:
             applied += 1
+            print(f"  ✅")
         else:
             failed += 1
+            print(f"  ❌ {item.processing.error_reason or 'unknown error'}")
+    if ready:
+        print("─" * 70)
+        print(f"  Applied: {applied}  |  Failed: {failed}")
     sync_meta_from_manifest(meta, manifest)
     save_manifest(root_dir, manifest)
     save_meta(root_dir, meta)
@@ -1519,10 +1560,19 @@ def poll_and_progress(root_dir: Path, meta: BatchMeta, manifest: Manifest, confi
         sync_meta_from_manifest(meta, manifest)
         save_manifest(root_dir, manifest)
         save_meta(root_dir, meta)
+        if not created:
+            print("  ℹ️  Nothing to do — no pending images and no active batch.")
         return {"action": "submitted_new_batch" if created else "nothing_to_do", "batch_id": meta.active_batch_id}
 
+    print(f"\n🔄 Polling batch {meta.active_batch_id}...", end="", flush=True)
     batch = poll_active_batch(root_dir, meta, config)
-    result["remote_status"] = batch.get("status")
+    counts = batch.get("request_counts") or {}
+    status = batch.get("status", "unknown")
+    c_done = counts.get("completed", "?")
+    c_fail = counts.get("failed", "?")
+    c_total = counts.get("total", "?")
+    print(f"  status: {status}  (completed={c_done}, failed={c_fail}, total={c_total})")
+    result["remote_status"] = status
     result["batch_id"] = meta.active_batch_id
 
     if batch.get("status") in {"completed", "cancelled"}:
@@ -1725,9 +1775,26 @@ def main() -> int:
         return 1
 
     try:
+        print(f"\n{'='*70}")
+        print("BATCH IMAGETAGGER - AI Image Keyword Extractor")
+        print(f"{'='*70}")
+        print(f"Model:    {config.model}")
+        print(f"Input:    {root_dir}")
+        print(f"Mode:     {'Overwrite originals' if args.overwrite else 'Create enriched copies'}")
+        print(f"Marker:   '{args.tag}'  ({'XPComment' if args.xpcomment else 'XPKeywords'})")
+        print(f"Temp:     {args.temperature}")
+        privacy = []
+        if args.dropgps:
+            privacy.append("GPS stripped")
+        if args.dropdatetime:
+            privacy.append("datetime stripped")
+        if privacy:
+            print(f"Privacy:  {', '.join(privacy)}")
+        print(f"{'='*70}")
+
         meta, manifest, created = load_or_create_state(root_dir, args, config)
         if created:
-            print(f"Created new batch state in {state_dir(root_dir)}")
+            print(f"\n✅ Created new batch state in {state_dir(root_dir)}")
 
         # Existing state wins over fresh CLI flags for ongoing work.
         if meta.settings:
@@ -1752,8 +1819,8 @@ def main() -> int:
         meta = load_meta(root_dir)
         manifest = load_manifest(root_dir)
         print_summary(meta, manifest)
-        if result:
-            print("Result:")
+        if args.verbose and result:
+            print("Result detail:")
             print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     except KeyboardInterrupt:

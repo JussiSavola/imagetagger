@@ -280,7 +280,8 @@ Rules:
             {"role": "user", "content": user_content}
         ],
         "max_tokens": 200,
-        "temperature": temperature
+        "temperature": temperature,
+        "think": False   # Ollama: suppress chain-of-thought for thinking models (ignored by other providers)
     }
 
     if config.is_venice:

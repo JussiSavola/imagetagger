@@ -989,6 +989,7 @@ def build_openai_chat_body(
         ],
         "max_tokens": 200,
         "temperature": temperature,
+        "think": False,  # Ollama: suppress chain-of-thought for thinking models (ignored by other providers)
     }
     if prompt_cache_key:
         body["prompt_cache_key"] = prompt_cache_key

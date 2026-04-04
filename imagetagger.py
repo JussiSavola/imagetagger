@@ -573,6 +573,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
     skipped = 0
     processed = 0
     errors = 0
+    error_log = []  # list of (filename, reason)
     times_preprocess = []
     times_ai = []
     times_metadata = []
@@ -633,9 +634,11 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 return
 
             if is_error or is_refusal:
+                reason = ai_response[:120] if is_error else "Model refusal (no keywords extracted)"
                 print(f"  ❌ FAILED: {ai_response}")
                 print(f"  ⏭️  SKIPPING - Metadata left untouched due to error/refusal")
                 errors += 1
+                error_log.append((img_file.name, reason))
                 continue # Skip to next image immediately
 
             # API balance/credits checks
@@ -696,6 +699,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                     target_to_write.unlink()
                 print(f"  ⚠️  Metadata preserved (no keywords written)")
                 errors += 1
+                error_log.append((img_file.name, "Metadata write failed"))
 
             # 5. Save text log
             log_dir = input_path / "enriched"
@@ -741,6 +745,7 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
         except Exception as e:
             print(f"\n  ❌ ERROR: {e}")
             errors += 1
+            error_log.append((img_file.name, str(e)[:120]))
             if verbose:
                 import traceback
                 traceback.print_exc()
@@ -754,6 +759,11 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
     print(f"  Skipped:   {skipped}")
     print(f"  Errors:    {errors}")
     print(f"  Total:     {len(images)}")
+
+    if error_log:
+        print(f"\n  Failed files:")
+        for fname, reason in error_log:
+            print(f"    ❌ {fname}: {reason}")
 
     if times_preprocess:
         sum_pre   = sum(times_preprocess)

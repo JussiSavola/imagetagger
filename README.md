@@ -33,6 +33,8 @@ Other OpenAI-compatible providers work too.
 - **Prevent Reprocessing**: Uses a configurable marker tag to avoid reprocessing already handled images
 - **Custom Tag Support**: Set a custom marker to identify processed images
 - **Marker Field Selection**: Store marker in XPComment field (`-x`) or in XPKeywords (default)
+- **Configurable Temperature**: Control AI sampling temperature (`-T`) for reproducibility vs. variety
+- **Privacy Flags**: `--dropgps` strips GPS coordinates, `--dropdatetime` strips datetime fields from output images; both are preserved by default
 - **External Config**: Specify environment file location (useful for packaged executables)
 
 ## Requirements
@@ -84,8 +86,9 @@ Or specify a custom location with the `-e` flag.
 
 ```
 usage: imagetagger [-h] [-d DIRECTORY] [-e ENV] [-o] [-v] [-f] [-t TAG] [-x]
+                   [-T TEMPERATURE] [--dropgps] [--dropdatetime]
 
-Tag images with AI-generated keywords using Venice.ai vision models.
+Tag images with AI-generated keywords using vision models.
 
 options:
   -h, --help            show this help message and exit
@@ -98,6 +101,10 @@ options:
   -f, --force           Force reprocessing of all images, even if already processed
   -t TAG, --tag TAG     Custom marker tag for processed images (default: jms)
   -x, --xpcomment       Store marker ONLY in XPComment field (not in keywords list)
+  -T TEMPERATURE, --temperature TEMPERATURE
+                        AI sampling temperature 0.0–1.0 (default: 0.2; lower = more consistent)
+  --dropgps             Strip GPS coordinates from output images
+  --dropdatetime        Strip datetime fields from output images
 ```
 
 ### Examples
@@ -121,8 +128,14 @@ python imagetagger.py -d ./photos -f
 # Verbose mode for debugging
 python imagetagger.py -d ./photos -v
 
-# Full example: overwrite originals, custom marker, XPComment, force reprocess
-python imagetagger.py -d ./photos -o -t "mytag" -x -f -v
+# Use temperature 0 for fully deterministic/consistent results
+python imagetagger.py -d ./photos -T 0
+
+# Strip GPS and datetime for privacy
+python imagetagger.py -d ./photos --dropgps --dropdatetime
+
+# Full example: overwrite originals, custom marker, XPComment, force reprocess, privacy flags
+python imagetagger.py -d ./photos -o -t "mytag" -x -f -v --dropgps --dropdatetime
 ```
 
 ## How It Works
@@ -213,6 +226,7 @@ Input:  C:\Users\name\photos
 Mode:   Create copies in enriched subfolder
 Marker: 'jms'
 Marker field: XPKeywords (in keyword list)
+Temperature: 0.2
 ======================================================================
 
 Found 18 image(s)

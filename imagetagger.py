@@ -561,13 +561,24 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
         print(f"Config Error: {e}")
         return
     
-    images = [f for f in input_path.iterdir() 
-              if f.is_file() and f.suffix.lower() in SUPPORTED_FORMATS]
-    
+    # Clean up any orphaned temp files left by a previous crashed run
+    for orphan in input_path.glob("*_temp.*"):
+        if orphan.suffix.lower() in SUPPORTED_FORMATS:
+            try:
+                orphan.unlink()
+                print(f"  🧹 Removed orphaned temp file: {orphan.name}")
+            except OSError as e:
+                print(f"  ⚠️  Could not remove orphaned temp file {orphan.name}: {e}")
+
+    images = [f for f in input_path.iterdir()
+              if f.is_file()
+              and f.suffix.lower() in SUPPORTED_FORMATS
+              and not f.stem.endswith('_temp')]
+
     if not images:
         print(f"No supported images found in {input_path}")
         return
-    
+
     print(f"Found {len(images)} image(s)\n")
     
     skipped = 0

@@ -40,7 +40,6 @@ import requests
 from PIL import Image
 from PIL.ExifTags import TAGS
 
-print("RUNNING FIXED SCRIPT")
 
 # Ensure UTF-8 output on Windows where the default terminal encoding (cp1252)
 # cannot represent emoji characters used in status messages.
@@ -198,6 +197,10 @@ class APIConfig:
         self.project = self.config.get("project")
         self.prompt_cache_key = self.config.get("prompt_cache_key")
         self.request_timeout = float(self.config.get("request_timeout", "120"))
+
+    def apply_overrides(self, model_override: Optional[str] = None) -> None:
+        if model_override:
+            self.model = model_override
 
     def get_headers(self, *, json_content: bool = True) -> Dict[str, str]:
         headers = {
@@ -385,6 +388,8 @@ def save_with_new_metadata(
     verbose: bool = False,
     marker: Optional[str] = None,
     use_xpcomment: bool = False,
+    drop_gps: bool = False,
+    drop_datetime: bool = False,
 ) -> bool:
     try:
         import piexif
@@ -395,6 +400,16 @@ def save_with_new_metadata(
                 exif_dict = piexif.load(original_exif_bytes)
             else:
                 exif_dict = {"0th": {}, "1st": {}, "Exif": {}, "GPS": {}, "thumbnail": None}
+
+            if drop_gps:
+                exif_dict["GPS"] = {}
+
+            if drop_datetime:
+                for tag in [ImageIFD.DateTime]:
+                    exif_dict["0th"].pop(tag, None)
+                for tag in [ExifIFD.DateTimeOriginal, ExifIFD.DateTimeDigitized,
+                            37521, 37522]:  # SubsecTimeOriginal, SubsecTimeDigitized (no named constant in piexif)
+                    exif_dict["Exif"].pop(tag, None)
 
             keywords_str = ", ".join(keywords) if keywords else "AI analyzed"
             description = ai_raw_response[:500] if len(ai_raw_response) > 500 else ai_raw_response
@@ -422,6 +437,10 @@ def save_with_new_metadata(
                 if use_xpcomment:
                     print(f"    XPComment: {comment_text}")
                 print(f"    Processing marker '{marker}' in: {marker_location}")
+                if drop_gps:
+                    print(f"    GPS data: stripped")
+                if drop_datetime:
+                    print(f"    Datetime fields: stripped")
 
             exif_bytes = piexif.dump(exif_dict)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -485,6 +504,9 @@ class BatchSettings:
     max_dimensions: List[int] = field(default_factory=lambda: [MAX_DIMENSIONS[0], MAX_DIMENSIONS[1]])
     supported_formats: List[str] = field(default_factory=lambda: list(SUPPORTED_FORMATS))
     max_batch_bytes: int = DEFAULT_MAX_BATCH_BYTES
+    temperature: float = 0.2
+    drop_gps: bool = False
+    drop_datetime: bool = False
 
 
 @dataclass
@@ -754,9 +776,20 @@ def build_output_paths(root_dir: Path, image_path: Path, overwrite: bool) -> Tup
 
 
 def build_manifest(root_dir: Path, settings: BatchSettings, *, verbose: bool = False) -> Manifest:
+    # Clean up orphaned temp files left by a previous crashed run
+    for orphan in root_dir.glob("*_temp.*"):
+        if orphan.suffix.lower() in SUPPORTED_FORMATS:
+            try:
+                orphan.unlink()
+                print(f"  🧹 Removed orphaned temp file: {orphan.name}")
+            except OSError as e:
+                print(f"  ⚠️  Could not remove orphaned temp file {orphan.name}: {e}")
+
     images = [
         p for p in sorted(root_dir.iterdir(), key=lambda x: x.name.lower())
-        if p.is_file() and p.suffix.lower() in SUPPORTED_FORMATS
+        if p.is_file()
+        and p.suffix.lower() in SUPPORTED_FORMATS
+        and not p.stem.endswith("_temp")
     ]
 
     items: List[ManifestItem] = []
@@ -912,6 +945,7 @@ def build_openai_chat_body(
     base64_image: str,
     metadata_context: str,
     prompt_cache_key: Optional[str] = None,
+    temperature: float = 0.2,
 ) -> dict:
     b64_clean = base64_image.strip().replace("\n", "").replace("\r", "")
     system_prompt = (
@@ -933,7 +967,7 @@ def build_openai_chat_body(
             {"role": "user", "content": user_content},
         ],
         "max_tokens": 200,
-        "temperature": 0.2,
+        "temperature": temperature,
     }
     if prompt_cache_key:
         body["prompt_cache_key"] = prompt_cache_key
@@ -1036,6 +1070,7 @@ def prepare_next_chunk(root_dir: Path, meta: BatchMeta, manifest: Manifest, conf
             base64_image=b64_image,
             metadata_context=metadata_context,
             prompt_cache_key=config.prompt_cache_key,
+            temperature=meta.settings.temperature if meta.settings else 0.2,
         )
         line_bytes = estimate_jsonl_line_bytes(item.custom_id, body)
 
@@ -1329,6 +1364,8 @@ def apply_completed_item(root_dir: Path, meta: BatchMeta, item: ManifestItem, *,
             verbose=verbose,
             marker=meta.settings.marker if meta.settings else DEFAULT_TAG,
             use_xpcomment=meta.settings.use_xpcomment if meta.settings else False,
+            drop_gps=meta.settings.drop_gps if meta.settings else False,
+            drop_datetime=meta.settings.drop_datetime if meta.settings else False,
         )
         if not ok:
             raise RuntimeError("save_with_new_metadata() returned False")
@@ -1530,7 +1567,7 @@ def poll_and_progress(root_dir: Path, meta: BatchMeta, manifest: Manifest, confi
 # ---------------------------------------------------------------------------
 
 
-def print_summary(meta: BatchMeta) -> None:
+def print_summary(meta: BatchMeta, manifest: Optional[Manifest] = None) -> None:
     c = meta.counters
     print("\n" + "=" * 70)
     print("BATCH IMAGETAGGER STATUS")
@@ -1563,6 +1600,22 @@ def print_summary(meta: BatchMeta) -> None:
     print(f"Failed parse:   {c.failed_parse}")
     print(f"Failed apply:   {c.failed_apply}")
     print(f"Invalidated:    {c.invalidated}")
+    if manifest:
+        failed_items = [
+            item for item in manifest.items
+            if item.processing.status in {
+                ItemStatus.FAILED_REMOTE.value,
+                ItemStatus.FAILED_PARSE.value,
+                ItemStatus.FAILED_APPLY.value,
+                ItemStatus.INVALIDATED.value,
+            }
+        ]
+        if failed_items:
+            print("-" * 70)
+            print("Failed files:")
+            for item in failed_items:
+                reason = item.processing.error_reason or item.processing.status_reason or item.processing.status
+                print(f"  ❌ {item.source_relpath}: {reason[:100]}")
     print("=" * 70)
 
 
@@ -1608,6 +1661,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-f", "--force", action="store_true", help="Ignore already-processed marker checks when building a new manifest")
     parser.add_argument("-t", "--tag", type=str, default=DEFAULT_TAG, help=f"Marker tag (default: {DEFAULT_TAG})")
     parser.add_argument("-x", "--xpcomment", action="store_true", help="Store processing marker only in XPComment")
+    parser.add_argument("-m", "--model", type=str, default=None, help="Override the model from env.txt")
+    parser.add_argument("-T", "--temperature", type=float, default=0.2, help="AI sampling temperature 0.0–1.0 (default: 0.2)")
+    parser.add_argument("--dropgps", action="store_true", help="Strip GPS coordinates from output images")
+    parser.add_argument("--dropdatetime", action="store_true", help="Strip datetime fields from output images")
     parser.add_argument("--max-batch-bytes", type=int, default=DEFAULT_MAX_BATCH_BYTES, help=f"Soft cap for one batch input file (default: {DEFAULT_MAX_BATCH_BYTES})")
     parser.add_argument("--status", action="store_true", help="Only show local status, do not poll or submit")
     parser.add_argument("--cancel", action="store_true", help="Cancel the current active remote batch")
@@ -1631,6 +1688,9 @@ def load_or_create_state(root_dir: Path, args, config: APIConfig) -> Tuple[Batch
         overwrite=args.overwrite,
         force=args.force,
         max_batch_bytes=args.max_batch_bytes,
+        temperature=args.temperature,
+        drop_gps=args.dropgps,
+        drop_datetime=args.dropdatetime,
     )
     meta = BatchMeta(directory=str(root_dir), settings=settings)
     manifest = build_manifest(root_dir, settings, verbose=args.verbose)
@@ -1659,6 +1719,7 @@ def main() -> int:
 
     try:
         config = APIConfig(args.env)
+        config.apply_overrides(model_override=args.model)
     except Exception as e:
         print(f"Config error: {e}")
         return 1
@@ -1679,17 +1740,18 @@ def main() -> int:
         save_manifest(root_dir, manifest)
 
         if args.status:
-            print_summary(meta)
+            print_summary(meta, manifest)
             return 0
 
         if args.cancel:
             cmd_cancel(root_dir, meta, config)
-            print_summary(load_meta(root_dir))
+            print_summary(load_meta(root_dir), load_manifest(root_dir))
             return 0
 
         result = poll_and_progress(root_dir, meta, manifest, config, verbose=args.verbose)
         meta = load_meta(root_dir)
-        print_summary(meta)
+        manifest = load_manifest(root_dir)
+        print_summary(meta, manifest)
         if result:
             print("Result:")
             print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -687,7 +687,16 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
             
             if success:
                 if overwrite:
-                    shutil.move(str(target_to_write), str(final_output))
+                    # Retry loop: Windows Defender/Search Indexer can briefly lock a
+                    # freshly written file, causing shutil.move to fail with WinError 32.
+                    for _attempt in range(6):
+                        try:
+                            shutil.move(str(target_to_write), str(final_output))
+                            break
+                        except PermissionError:
+                            if _attempt == 5:
+                                raise
+                            time.sleep(0.5)
                     print(f"  ✅ Overwritten: {final_output.name}")
                 else:
                     print(f"  ✅ Enriched: {final_output.name}")
@@ -750,7 +759,10 @@ def process_images(input_dir, overwrite=False, verbose=False, force=False,
                 import traceback
                 traceback.print_exc()
             if overwrite and temp_file and temp_file.exists():
-                temp_file.unlink()
+                try:
+                    temp_file.unlink()
+                except PermissionError:
+                    print(f"  ⚠️  Could not delete temp file (file locked): {temp_file.name}")
     
     # Summary
     print(f"\n{'='*70}")

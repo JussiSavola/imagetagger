@@ -969,17 +969,31 @@ def build_openai_chat_body(
     temperature: float = 0.2,
 ) -> dict:
     b64_clean = base64_image.strip().replace("\n", "").replace("\r", "")
+    # Alternative simpler prompt (kept for reference):
+    # system_prompt = (
+    #     "You are a computer vision tagger. Analyze images and return ONLY a "
+    #     "comma-separated list of 10-15 relevant keywords/tags.\n"
+    #     "Rules:\n"
+    #     "- Return ONLY keywords separated by commas\n"
+    #     "- NO sentences, NO descriptions\n"
+    #     "- Include: objects, scenes, weather, colors, materials, brands, activities"
+    # )
     system_prompt = (
-        "You are a computer vision tagger. Analyze images and return ONLY a "
-        "comma-separated list of 10-15 relevant keywords/tags.\n"
+        "Extract 12-20 useful image keywords for photo search.\n\n"
         "Rules:\n"
-        "- Return ONLY keywords separated by commas\n"
-        "- NO sentences, NO descriptions\n"
-        "- Include: objects, scenes, weather, colors, materials, brands, activities"
+        "- Use specific visual tags, not generic words\n"
+        "- Prefer concrete scene terms over abstract ones\n"
+        "- Include beverage type if likely\n"
+        "- Include setting and view if visible\n"
+        "- Include lighting/time-of-day if inferable\n"
+        "- Avoid obvious filler like \"liquid\", \"beverage\", \"glass\" unless needed\n"
+        "- Return ONLY a comma-separated list, no sentences, no descriptions\n\n"
+        "Good keyword style example:\n"
+        "beer, lager, pint glass, condensation, foam, window view, harbour, waterfront, sunlight, indoor lounge, daytime"
     )
     user_content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_clean}"}},
-        {"type": "text", "text": f"Generate keywords. Metadata context: {metadata_context[:200]}"},
+        {"type": "text", "text": f"Metadata context: {metadata_context[:200]}\n\nNow extract keywords for this image."},
     ]
     body = {
         "model": model,

@@ -262,15 +262,30 @@ def call_AI_vision_for_keywords(base64_image, metadata_context, config, verbose=
     url = f"{config.base_url}/chat/completions"
     b64_clean = base64_image.strip().replace('\n', '').replace('\r', '')
     
-    system_prompt = """You are a computer vision tagger. Analyze images and return ONLY a comma-separated list of 10-15 relevant keywords/tags.
+    # Alternative simpler prompt (kept for reference):
+    # system_prompt = """You are a computer vision tagger. Analyze images and return ONLY a comma-separated list of 10-15 relevant keywords/tags.
+    # Rules:
+    # - Return ONLY keywords separated by commas (e.g., "car tire, snow chains, winter, snow")
+    # - NO sentences, NO descriptions
+    # - Include: objects, scenes, weather, colors, materials, brands, activities"""
+
+    system_prompt = """Extract 12-20 useful image keywords for photo search.
+
 Rules:
-- Return ONLY keywords separated by commas (e.g., "car tire, snow chains, winter, snow")
-- NO sentences, NO descriptions
-- Include: objects, scenes, weather, colors, materials, brands, activities"""
+- Use specific visual tags, not generic words
+- Prefer concrete scene terms over abstract ones
+- Include beverage type if likely
+- Include setting and view if visible
+- Include lighting/time-of-day if inferable
+- Avoid obvious filler like "liquid", "beverage", "glass" unless needed
+- Return ONLY a comma-separated list, no sentences, no descriptions
+
+Good keyword style example:
+beer, lager, pint glass, condensation, foam, window view, harbour, waterfront, sunlight, indoor lounge, daytime"""
 
     user_content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_clean}"}},
-        {"type": "text", "text": f"Generate keywords. Metadata context: {metadata_context[:200]} /no_think"}
+        {"type": "text", "text": f"Metadata context: {metadata_context[:200]}\n\nNow extract keywords for this image. /no_think"}
     ]
 
     payload = {

@@ -71,6 +71,7 @@ class APIConfig:
             self.model = model_override
         self.is_vision = any(v in self.model.lower() for v in VISION_KEYWORDS)
         self.is_venice = 'venice.ai' in self.base_url
+        self.is_ollama = 'localhost' in self.base_url or '127.0.0.1' in self.base_url or 'ollama' in self.base_url
 
     def get_headers(self):
         return {
@@ -295,10 +296,12 @@ beer, lager, pint glass, condensation, foam, window view, harbour, waterfront, s
             {"role": "user", "content": user_content}
         ],
         "max_tokens": 700,
-        "num_predict": 700,  # Ollama alias for max_tokens (ignored by other providers)
         "temperature": temperature,
-        "think": False   # Ollama: suppress chain-of-thought for thinking models (ignored by other providers)
     }
+
+    if config.is_ollama:
+        payload["num_predict"] = 700  # Ollama alias for max_tokens
+        payload["think"] = False      # Ollama: suppress chain-of-thought for thinking models
 
     if config.is_venice:
         payload["venice_parameters"] = {
